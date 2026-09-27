@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>设备实时监视</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;height:100%;overflow:hidden;background:#091015;color:#e8f0f2;font:14px "Segoe UI",sans-serif}
+main{height:100%;display:grid;grid-template-rows:58px minmax(0,1fr) 112px;gap:1px;background:#26333a}
+header{background:#111b21;display:flex;align-items:center;justify-content:space-between;padding:0 18px}
+h1{font-size:19px;margin:0}.sub{color:#91a7b0;margin-left:12px;font-size:12px}.badge{padding:6px 11px;border-radius:14px;background:#183d32;color:#74e1b4}.badge.bad{background:#48241f;color:#ffad9d}
+.views{display:grid;grid-template-columns:1.15fr 1fr;gap:1px;min-height:0}.panel{position:relative;background:#05090c;min-width:0;min-height:0;overflow:hidden}
+.label{position:absolute;z-index:2;left:12px;top:10px;background:#111b21cc;border:1px solid #344650;border-radius:5px;padding:5px 8px;font-weight:600}
+#camera{width:100%;height:100%;object-fit:contain}canvas{width:100%;height:100%;display:block;cursor:grab}canvas:active{cursor:grabbing}
+.hint{position:absolute;right:10px;bottom:8px;color:#78909a;font-size:11px;background:#081016bb;padding:3px 6px;border-radius:4px}
+footer{background:#111b21;display:grid;grid-template-columns:repeat(4,1fr);gap:1px}.card{padding:11px 14px;background:#142129;overflow:hidden}.card b{display:block;color:#8fa8b2;font-size:11px;text-transform:uppercase;margin-bottom:7px}.value{font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.detail{margin-top:5px;color:#7f969f;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@media(max-width:900px){main{grid-template-rows:54px minmax(0,1fr) 180px}.views{grid-template-columns:1fr;grid-template-rows:1fr 1fr}footer{grid-template-columns:1fr 1fr}}
+</style>
+</head>
+<body><main>
+<header><div><h1 id="name">设备实时监视<span class="sub" id="identity"></span></h1></div><span class="badge bad" id="overall">连接中</span></header>
+<section class="views">
+  <div class="panel"><span class="label">相机</span><img id="camera" alt="camera"></div>
+  <div class="panel"><span class="label">点云</span><canvas id="cloud"></canvas><span class="hint">拖动旋转 · 滚轮缩放</span></div>
+</section>
+<footer>
+  <div class="card"><b>相机数据</b><div class="value" id="cameraState">等待中</div><div class="detail" id="cameraDetail">—</div></div>
+  <div class="card"><b>点云数据</b><div class="value" id="cloudState">等待中</div><div class="detail" id="cloudDetail">—</div></div>
+  <div class="card"><b>设备状态</b><div class="value" id="deviceState">等待中</div><div class="detail" id="deviceDetail">—</div></div>
+  <div class="card"><b>网络入口</b><div class="value" id="networkState">—</div><div class="detail" id="networkDetail">—</div></div>
+</footer>
+</main><script>
+const $=id=>document.getElementById(id), pause=ms=>new Promise(r=>setTimeout(r,ms));
+const image=$('camera'), canvas=$('cloud'), ctx=canvas.getContext('2d');
+let imageId='', imageTimes=[], cloudTimes=[], latestPoints=null, yaw=-.25, pitch=.58, zoom=1, dragging=false, px=0,py=0;
+const mark=(el,on)=>{el.className='badge'+(on?'':' bad')};
+async function cameraLoop(){while(true){const ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),1800);try{const r=await fetch('/latest.jpg?after='+imageId,{cache:'no-store',signal:ctl.signal});if(r.status===204)continue;if(!r.ok)throw Error();const id=r.headers.get('X-Frame-Id'),blob=await r.blob();if(id===imageId)continue;const url=URL.createObjectURL(blob),next=new Image();next.src=url;await next.decode();const old=image.src;image.src=url;imageId=id;imageTimes.push(performance.now());if(old.startsWith('blob:'))URL.revokeObjectURL(old)}catch(e){await pause(150)}finally{clearTimeout(timer)}}}
+async function cloudLoop(){while(true){try{const r=await fetch('/api/pointcloud.bin?t='+Date.now(),{cache:'no-store'});if(!r.ok)throw Error();const buf=await r.arrayBuffer(),stride=Number(r.headers.get('X-Point-Stride')||40),count=Number(r.headers.get('X-Point-Count')||0),v=new DataView(buf),pts=[];const step=Math.max(1,Math.ceil(count/14000));for(let i=0;i<count;i+=step){const o=i*stride;pts.push([v.getFloat64(o,true),v.getFloat64(o+8,true),v.getFloat64(o+16,true),v.getUint32(o+24,true)&255])}latestPoints=pts;cloudTimes.push(performance.now());drawCloud()}catch(e){}await pause(90)}}
+function resize(){const d=devicePixelRatio||1,w=Math.max(1,canvas.clientWidth),h=Math.max(1,canvas.clientHeight);canvas.width=w*d;canvas.height=h*d;ctx.setTransform(d,0,0,d,0,0);drawCloud()}
+function drawCloud(){const w=canvas.clientWidth,h=canvas.clientHeight;ctx.fillStyle='#05090c';ctx.fillRect(0,0,w,h);if(!latestPoints)return;const cy=Math.cos(yaw),sy=Math.sin(yaw),cp=Math.cos(pitch),sp=Math.sin(pitch);let extent=1;for(const [x,y,z] of latestPoints)extent=Math.max(extent,Math.abs(x),Math.abs(y),Math.abs(z)*2);const scale=Math.min(w,h)*.43/extent*zoom;ctx.globalAlpha=.9;for(const [x,y,z,intensity] of latestPoints){const f=x*cy-y*sy,l=x*sy+y*cy,u=z*cp-f*sp,sx=w/2+l*scale,syy=h*.57-u*scale;if(sx<0||sx>w||syy<0||syy>h)continue;const hue=185-Math.max(-1,Math.min(1,z/3))*75,light=42+Math.min(25,intensity/10);ctx.fillStyle=`hsl(${hue} 85% ${light}%)`;ctx.fillRect(sx,syy,1.7,1.7)}ctx.globalAlpha=1}
+canvas.addEventListener('pointerdown',e=>{dragging=true;px=e.clientX;py=e.clientY;canvas.setPointerCapture(e.pointerId)});canvas.addEventListener('pointermove',e=>{if(!dragging)return;yaw+=(e.clientX-px)*.008;pitch=Math.max(-1.3,Math.min(1.3,pitch+(e.clientY-py)*.008));px=e.clientX;py=e.clientY;drawCloud()});canvas.addEventListener('pointerup',()=>dragging=false);canvas.addEventListener('wheel',e=>{e.preventDefault();zoom=Math.max(.25,Math.min(8,zoom*Math.exp(-e.deltaY*.001)));drawCloud()},{passive:false});new ResizeObserver(resize).observe(canvas);
+const hz=times=>{const now=performance.now();while(times.length&&times[0]<now-5000)times.shift();return times.length>1?(times.length-1)*1000/(times.at(-1)-times[0]):0};
+async function refresh(){try{const [s,d]=await Promise.all([fetch('/api/status',{cache:'no-store'}).then(r=>r.json()),fetch('/api/device',{cache:'no-store'}).then(async r=>({ok:r.ok,data:await r.json()}))]);const im=s.image,pc=s.pointcloud,ok=im.healthy&&pc.healthy;$('name').firstChild.nodeValue=s.device.display_name;$('identity').textContent=`${s.device.device_ip||''} / ${s.device.sn}`;$('overall').textContent=ok?'实时数据正常':'数据异常';mark($('overall'),ok);$('cameraState').textContent=`${im.source_format||'—'} · ${(im.hz||hz(imageTimes)).toFixed(1)} Hz`;$('cameraDetail').textContent=`${im.width||0}×${im.height||0} · seq ${im.last_seq??'—'} · batch ${im.batch_size||1}`;$('cloudState').textContent=`${pc.points||0} 点 · ${(pc.hz||hz(cloudTimes)).toFixed(1)} Hz`;$('cloudDetail').textContent=`seq ${pc.last_seq??'—'} · scaler 1000 · gap ${pc.seq_gaps}`;$('deviceState').textContent=d.ok&&d.data.available!==false?`在线 · ${d.data.sn||s.device.sn}`:'状态接口不可用';$('deviceDetail').textContent=d.ok?(d.data.time||'数据通道在线'):(d.data.error||'—');$('networkState').textContent=s.device.device_ip||'—';$('networkDetail').textContent=im.endpoint||'—'}catch(e){$('overall').textContent='网关不可用';mark($('overall'),false)}}
+cameraLoop();cloudLoop();refresh();setInterval(refresh,1000);
+</script></body></html>

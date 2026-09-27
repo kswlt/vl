@@ -1,0 +1,17 @@
+#!/bin/sh
+# Bind external HYM8563 RTC (I2C-2 @ 0x51) at boot.
+# Kernel hctosys then restores system clock from RTC when valid.
+case "$1" in
+  start)
+    if [ ! -e /dev/rtc0 ] && [ -d /sys/bus/i2c/devices/i2c-2 ]; then
+      echo hym8563 0x51 > /sys/bus/i2c/devices/i2c-2/new_device 2>/dev/null
+    fi
+    ;;
+  stop)
+    ;;
+  *)
+    echo "Usage: $0 {start|stop}"
+    exit 1
+    ;;
+esac
+exit 0

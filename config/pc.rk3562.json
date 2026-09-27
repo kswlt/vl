@@ -1,0 +1,22 @@
+{
+  "instance_id": "rk3562",
+  "display_name": "RK3562 兼容设备",
+  "device_ip": "198.51.100.179",
+  "device_api": "http://198.51.100.179:8080/api/device",
+  "sn": "DEVICE00000001",
+  "record_pointcloud": false,
+  "image_endpoint": "tcp/198.51.100.179:7447#bind=198.51.100.200:0",
+  "pointcloud_endpoint": "tcp/198.51.100.179:7447#bind=198.51.100.200:0",
+  "bind": "127.0.0.1",
+  "http_port": 8081,
+  "board_time_sync_bind": "198.51.100.200",
+  "board_time_sync_port": 8123,
+  "foxglove_port": 8767,
+  "foxglove_image_mode": "jpeg_preview",
+  "foxglove_image_max_hz": 10,
+  "ffmpeg_path": "C:\\Users\\user\\AppData\\Local\\Microsoft\\WinGet\\Links\\ffmpeg.exe",
+  "stale_seconds": 3.0,
+  "reconnect_seconds": 8.0,
+  "ai_preview_width": 1920,
+  "ai_preview_quality": 85
+}

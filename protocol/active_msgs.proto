@@ -1,0 +1,48 @@
+syntax = "proto3";
+package active_msgs;
+
+// Wire definitions transcribed from Space Camera Communication Protocol V1.0, section 6.
+message Header {
+  uint32 seq = 1;
+  sint64 stamp = 2; // microseconds from RK Unix epoch CLOCK_REALTIME in unix_epoch mode
+  sint64 scaler = 3;
+}
+message Error { uint32 code = 1; string desc = 2; }
+message ImuMsg {
+  Header header = 1;
+  sint64 ax = 2; sint64 ay = 3; sint64 az = 4;
+  sint64 gx = 5; sint64 gy = 6; sint64 gz = 7;
+}
+message LidarPoint {
+  sint64 x = 1; sint64 y = 2; sint64 z = 3;
+  uint32 rgbi = 4; uint32 ring = 5; sint32 offset = 6;
+}
+message LidarPointMsg { Header header = 1; repeated LidarPoint points = 2; }
+enum ImageFormat {
+  ImageFormatRaw = 0; ImageFormatRgb = 1;
+  ImageFormatJpeg = 2; ImageFormatH264 = 3;
+}
+message ImageMsg {
+  Header header = 1; ImageFormat format = 2;
+  // H264 uses one complete Annex-B access unit per ImageMsg; JPEG uses one complete file.
+  uint32 width = 3; uint32 height = 4; bytes data = 5;
+}
+message FileMsg { Header header = 1; string path = 2; bytes data = 3; }
+message ImuMsgArray { repeated ImuMsg array = 1; }
+message LidarPointMsgArray { repeated LidarPointMsg array = 1; }
+message ImageMsgArray { repeated ImageMsg array = 1; }
+message FileMsgArray { repeated FileMsg array = 1; }
+message SettingRequest {
+  Header header = 1;
+  sint32 imu_fps = 2; sint32 lidar_fps = 3; sint32 image_fps = 4;
+  sint32 image_format = 5; // 0=no change, 1=H264, 2=JPEG (not the ImageFormat enum)
+  sint32 h264_gop = 6; sint32 h264_bitrate = 7; // bitrate in Mbps
+}
+message SettingResponse {
+  Header header = 1;
+  sint32 imu_fps = 2; sint32 lidar_fps = 3; sint32 image_fps = 4;
+  sint32 image_format = 5; sint32 h264_gop = 6; sint32 h264_bitrate = 7;
+  string parameter = 8; Error error = 15;
+}
+message RebootRequest { Header header = 1; }
+message RebootResponse { Header header = 1; Error error = 15; }

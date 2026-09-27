@@ -1,0 +1,44 @@
+#!/bin/sh
+# MC800S camera service. Retry transient ONVIF/RTSP startup failures.
+APP=/userdata/xtapp
+LOG=$APP/camera.log
+PIDFILE=/var/run/xt_camera_supervisor.pid
+
+case "$1" in
+  supervise)
+    cd "$APP" || exit 1
+    trap 'exit 0' TERM INT
+    while :; do
+      ./xt_camera >> "$LOG" 2>&1
+      echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') xt_camera exited; retrying in 10s" >> "$LOG"
+      sleep 10 & wait $!
+    done
+    ;;
+  start)
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+      echo "xt_camera supervisor already running"
+      exit 0
+    fi
+    rm -f "$PIDFILE"
+    if pidof xt_camera >/dev/null 2>&1; then
+      echo "xt_camera already running without supervisor"
+      exit 0
+    fi
+    setsid nohup "$0" supervise >/dev/null 2>&1 < /dev/null &
+    echo $! > "$PIDFILE"
+    echo "xt_camera supervisor pid=$(cat "$PIDFILE")"
+    ;;
+  stop)
+    if [ -f "$PIDFILE" ]; then
+      kill "$(cat "$PIDFILE")" 2>/dev/null || true
+      rm -f "$PIDFILE"
+    fi
+    killall xt_camera 2>/dev/null || true
+    ;;
+  restart)
+    "$0" stop
+    sleep 1
+    "$0" start
+    ;;
+  *) echo "usage: $0 {start|stop|restart}"; exit 1 ;;
+esac

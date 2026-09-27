@@ -1,0 +1,39 @@
+#!/bin/sh
+# XT-M60 雷达协议转换服务 (空间相机通信协议V1.0)
+# 启动: /etc/init.d/S99xtradar start
+
+BIN=/userdata/xtapp/xt_radar
+LOG=/userdata/xtapp/xt_radar.log
+PIDFILE=/var/run/xt_radar.pid
+
+start() {
+    echo "Starting xt_radar..."
+    if [ -f "$PIDFILE" ] && kill -0 $(cat "$PIDFILE") 2>/dev/null; then
+        echo "xt_radar already running"
+        return 0
+    fi
+    cd /userdata/xtapp
+    setsid nohup env XT_RADAR_INGEST_ONLY=1 XT_PC_UDP_MIRROR=1 "$BIN" > "$LOG" 2>&1 < /dev/null &
+    disown 2>/dev/null
+    echo $! > "$PIDFILE"
+    sleep 1
+    echo "xt_radar started (pid $(cat $PIDFILE))"
+}
+
+stop() {
+    echo "Stopping xt_radar..."
+    if [ -f "$PIDFILE" ]; then
+        kill -9 $(cat "$PIDFILE") 2>/dev/null
+        rm -f "$PIDFILE"
+    fi
+    killall xt_radar 2>/dev/null
+    echo "xt_radar stopped"
+}
+
+case "$1" in
+    start) start ;;
+    stop) stop ;;
+    restart) stop; sleep 1; start ;;
+    *) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac
+exit 0

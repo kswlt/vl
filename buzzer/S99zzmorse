@@ -1,0 +1,32 @@
+#!/bin/sh
+# Sensor stream alarm, started at boot.
+PIDFILE=/var/run/xt_morse_monitor.pid
+case "$1" in
+  start)
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+      exit 0
+    fi
+    rm -f "$PIDFILE"
+    setsid /userdata/xtapp/morse_monitor_status > /tmp/mm.out 2>&1 < /dev/null &
+    echo $! > "$PIDFILE"
+    echo "morse_monitor started pid=$(cat "$PIDFILE")"
+    ;;
+  stop)
+    if [ -f "$PIDFILE" ]; then
+      kill "$(cat "$PIDFILE")" 2>/dev/null || true
+      rm -f "$PIDFILE"
+    fi
+    killall buzzer_morse 2>/dev/null || true
+    echo "morse_monitor stopped"
+    ;;
+  restart)
+    "$0" stop
+    sleep 1
+    "$0" start
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart}"
+    exit 1
+    ;;
+esac
+exit 0

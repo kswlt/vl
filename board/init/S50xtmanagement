@@ -1,0 +1,67 @@
+#!/bin/sh
+# Persistent management-plane configuration for the board Web console.
+APP=/userdata/xtapp
+NET="$APP/management-network.conf"
+TIME="$APP/management-time.conf"
+MOBILE="$APP/management-mobile.conf"
+SSHCONF="$APP/management-ssh.conf"
+
+apply_network() {
+    [ -r "$NET" ] || return 0
+    . "$NET"
+    case "${NETWORK_IF:-}" in eth0|eth1) ;; *) return 1 ;; esac
+    ip link set "$NETWORK_IF" up 2>/dev/null || true
+    if [ "${NETWORK_MODE:-dhcp}" = dhcp ]; then
+        [ -r "/var/run/udhcpc.$NETWORK_IF.pid" ] && kill "$(cat "/var/run/udhcpc.$NETWORK_IF.pid")" 2>/dev/null || true
+        ip addr flush dev "$NETWORK_IF" scope global 2>/dev/null || true
+        udhcpc -i "$NETWORK_IF" -p "/var/run/udhcpc.$NETWORK_IF.pid" -b -q 2>/dev/null || true
+    else
+        [ -r "/var/run/udhcpc.$NETWORK_IF.pid" ] && kill "$(cat "/var/run/udhcpc.$NETWORK_IF.pid")" 2>/dev/null || true
+        ip addr flush dev "$NETWORK_IF" scope global 2>/dev/null || true
+        ip addr add "$NETWORK_IP/$NETWORK_PREFIX" dev "$NETWORK_IF"
+        [ -n "${NETWORK_GATEWAY:-}" ] && ip route replace default via "$NETWORK_GATEWAY" dev "$NETWORK_IF" 2>/dev/null || true
+        if [ -n "${NETWORK_DNS:-}" ]; then
+            : > /etc/resolv.conf
+            oldifs=$IFS; IFS=,
+            for server in $NETWORK_DNS; do echo "nameserver $server" >> /etc/resolv.conf; done
+            IFS=$oldifs
+        fi
+    fi
+}
+
+apply_time() {
+    [ -r "$TIME" ] || return 0
+    . "$TIME"
+    [ -n "${TIMEZONE:-}" ] && [ -e "/usr/share/zoneinfo/$TIMEZONE" ] && ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
+    [ -n "${TIMEZONE:-}" ] && echo "$TIMEZONE" > /etc/timezone
+    first_ntp=$(printf '%s' "${NTP_SERVERS:-}" | cut -d, -f1)
+    if [ -n "$first_ntp" ]; then
+        if command -v chronyc >/dev/null 2>&1; then chronyc add server "$first_ntp" iburst >/dev/null 2>&1 || true; chronyc burst 4/4 >/dev/null 2>&1 || true
+        elif command -v ntpd >/dev/null 2>&1; then ntpd -q -p "$first_ntp" >/dev/null 2>&1 & fi
+    fi
+}
+
+apply_mobile() {
+    [ -r "$MOBILE" ] || return 0
+    . "$MOBILE"
+    if [ -n "${MOBILE_APN:-}" ] && command -v mmcli >/dev/null 2>&1; then
+        mmcli -m 0 --simple-connect="apn=$MOBILE_APN" >/dev/null 2>&1 || true
+    fi
+}
+
+apply_ssh() {
+    [ -r "$SSHCONF" ] && . "$SSHCONF"
+    [ "${SSH_ENABLED:-1}" = 1 ] || return 0
+    if [ -x /etc/init.d/S50dropbear ]; then /etc/init.d/S50dropbear start >/dev/null 2>&1 || true
+    elif command -v dropbear >/dev/null 2>&1 && ! pidof dropbear >/dev/null 2>&1; then dropbear -R -B -p 22; fi
+}
+
+case "${1:-}" in
+  start|restart) apply_network; apply_time; apply_mobile; apply_ssh ;;
+  network) apply_network ;;
+  time) apply_time ;;
+  mobile) apply_mobile ;;
+  ssh) apply_ssh ;;
+  stop) ;;
+  *) echo "usage: $0 {start|restart|network|time|mobile|ssh}"; exit 1 ;;
+esac

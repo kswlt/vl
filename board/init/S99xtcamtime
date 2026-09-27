@@ -1,0 +1,56 @@
+#!/bin/sh
+# Keep the MC800S video overlay clock aligned with the RK system clock.
+PIDFILE=/var/run/xt_camera_time.pid
+CAMERA=http://192.0.2.123/Device
+
+sync_camera() {
+    [ "$(date -u +%Y)" -ge 2020 ] || return 1
+    year=$(date -u +%Y)
+    month=$(date -u +%m)
+    day=$(date -u +%d)
+    hour=$(date -u +%H)
+    minute=$(date -u +%M)
+    second=$(date -u +%S)
+    cat > /tmp/xt_camera_time.xml <<EOF
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:tds="http://www.onvif.org/ver10/device/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema"><s:Body><tds:SetSystemDateAndTime><tds:DateTimeType>Manual</tds:DateTimeType><tds:DaylightSavings>false</tds:DaylightSavings><tds:TimeZone><tt:TZ>CST-8</tt:TZ></tds:TimeZone><tds:UTCDateTime><tt:Time><tt:Hour>$hour</tt:Hour><tt:Minute>$minute</tt:Minute><tt:Second>$second</tt:Second></tt:Time><tt:Date><tt:Year>$year</tt:Year><tt:Month>$month</tt:Month><tt:Day>$day</tt:Day></tt:Date></tds:UTCDateTime></tds:SetSystemDateAndTime></s:Body></s:Envelope>
+EOF
+    wget -qO- -T 5 --header 'Content-Type: application/soap+xml; charset=utf-8' \
+        --post-file /tmp/xt_camera_time.xml "$CAMERA" 2>/dev/null |
+        grep -q SetSystemDateAndTimeResponse
+}
+
+case "$1" in
+    run)
+        trap 'exit 0' TERM INT
+        failures=0
+        while :; do
+            if sync_camera; then
+                failures=0
+                # Re-check periodically after both the board and camera have started.
+                sleep 300 & wait $!
+            else
+                failures=$((failures + 1))
+                if [ "$failures" -eq 1 ] || [ $((failures % 15)) -eq 0 ]; then
+                    logger -t xt-camtime 'MC800S time sync failed; retrying in 2s'
+                fi
+                sleep 2 & wait $!
+            fi
+        done
+        ;;
+    sync) sync_camera ;;
+    start)
+        if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then exit 0; fi
+        rm -f "$PIDFILE"
+        setsid nohup "$0" run >/dev/null 2>&1 < /dev/null &
+        echo $! > "$PIDFILE"
+        ;;
+    stop)
+        if [ -f "$PIDFILE" ]; then
+            kill "$(cat "$PIDFILE")" 2>/dev/null || true
+            rm -f "$PIDFILE"
+        fi
+        ;;
+    restart) "$0" stop; "$0" start ;;
+    *) echo "usage: $0 {start|stop|restart|sync}"; exit 1 ;;
+esac

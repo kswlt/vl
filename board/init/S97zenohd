@@ -1,0 +1,34 @@
+#!/bin/sh
+
+DAEMON=/userdata/xtapp/zenohd
+PIDFILE=/var/run/zenohd.pid
+LOG=/userdata/xtapp/zenohd.log
+
+case "$1" in
+  start)
+    [ -x "$DAEMON" ] || exit 1
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+      exit 0
+    fi
+    rm -f "$PIDFILE"
+    setsid "$DAEMON" -l tcp/0.0.0.0:7447 --no-multicast-scouting >>"$LOG" 2>&1 &
+    echo $! >"$PIDFILE"
+    ;;
+  stop)
+    if [ -f "$PIDFILE" ]; then
+      kill "$(cat "$PIDFILE")" 2>/dev/null || true
+      rm -f "$PIDFILE"
+    else
+      killall zenohd 2>/dev/null || true
+    fi
+    ;;
+  restart)
+    "$0" stop
+    sleep 1
+    "$0" start
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart}"
+    exit 1
+    ;;
+esac

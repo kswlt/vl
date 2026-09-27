@@ -1,0 +1,19 @@
+#!/bin/sh
+# Boot-complete chime: plays the DJI-style three-note chime once after all
+# services started. S99zz* sorts after S99xtradar, so this runs last.
+# Uses the new single-note player (buzzer_play) at max volume (50% duty).
+case "$1" in
+  start)
+    sleep 1
+    /userdata/xtapp/buzzer_play dji 50 23 > /tmp/bootbeep.log 2>&1 &
+    ;;
+  stop)
+    pkill -f 'buzzer_play dji' 2>/dev/null
+    ;;
+  restart|reload)
+    pkill -f 'buzzer_play dji' 2>/dev/null
+    sleep 1
+    /userdata/xtapp/buzzer_play dji 50 23 > /tmp/bootbeep.log 2>&1 &
+    ;;
+esac
+exit 0

@@ -1,0 +1,20 @@
+#!/bin/sh
+# Sensor-neutral Zenoh session, command/config service, and local ingest.
+BIN=/userdata/xtapp/xt_gateway
+LOG=/userdata/xtapp/xt_gateway.log
+PIDFILE=/var/run/xt_gateway.pid
+start() {
+    [ -f "$PIDFILE" ] && kill -0 $(cat "$PIDFILE") 2>/dev/null && return 0
+    cd /userdata/xtapp
+    setsid nohup env XT_GATEWAY_MODE=1 "$BIN" > "$LOG" 2>&1 < /dev/null &
+    echo $! > "$PIDFILE"
+}
+stop() {
+    [ -f "$PIDFILE" ] && kill -9 $(cat "$PIDFILE") 2>/dev/null
+    rm -f "$PIDFILE" /tmp/xt_image_ingest.sock /tmp/xt_pointcloud_ingest.sock
+    killall xt_gateway 2>/dev/null
+}
+case "$1" in
+ start) start ;; stop) stop ;; restart) stop; sleep 1; start ;;
+ *) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac

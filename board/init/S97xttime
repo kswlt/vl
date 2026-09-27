@@ -1,0 +1,55 @@
+#!/bin/sh
+# Synchronize the RTC-less RK board from the directly attached Windows host.
+APP=/userdata/xtapp
+PIDFILE=/var/run/xt_time_sync.pid
+URL=http://198.51.100.200:8123/time
+
+valid_time() {
+    [ "$(date +%Y 2>/dev/null || echo 1970)" -ge 2020 ]
+}
+
+sync_once() {
+    epoch=$(wget -qO- -T 2 "$URL" 2>/dev/null | tr -cd '0-9')
+    [ ${#epoch} -ge 10 ] || return 1
+    [ "$epoch" -ge 1577836800 ] || return 1
+    date -u -s "@$epoch" >/dev/null 2>&1
+    hwclock -w 2>/dev/null || true
+}
+
+wait_and_recover() {
+    echo $$ > "$PIDFILE"
+    while ! valid_time; do
+        if sync_once; then
+            logger -t xt-time "system time synchronized from 198.51.100.200"
+            # If sensor services already attempted startup with an invalid
+            # clock, restart all three in dependency order.
+            /etc/init.d/S98zzgateway restart >/dev/null 2>&1 || true
+            /etc/init.d/S99xtradar restart >/dev/null 2>&1 || true
+            /etc/init.d/S99xtcamera restart >/dev/null 2>&1 || true
+            break
+        fi
+        sleep 2
+    done
+    rm -f "$PIDFILE"
+}
+
+case "$1" in
+  start)
+    # Always try host sync first: RTC time may be stale/wrong after power loss,
+    # and hctosys may have just overwritten the system clock with it.
+    if sync_once; then
+        logger -t xt-time "system time synchronized from 198.51.100.200"
+        exit 0
+    fi
+    # Host unreachable: fall back to RTC time if plausible.
+    valid_time && exit 0
+    [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null && exit 0
+    wait_and_recover &
+    ;;
+  stop)
+    [ -f "$PIDFILE" ] && kill "$(cat "$PIDFILE")" 2>/dev/null || true
+    rm -f "$PIDFILE"
+    ;;
+  restart) "$0" stop; "$0" start ;;
+  *) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac

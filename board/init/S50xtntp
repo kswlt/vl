@@ -1,0 +1,43 @@
+#!/bin/sh
+# Optional, persistent NTP client configuration for multi-board deployments.
+# One server hostname/IP per line in /userdata/xtapp/ntp-servers.conf.
+set -eu
+SERVERS=/userdata/xtapp/ntp-servers.conf
+CONFIG=/etc/chrony.conf
+
+case "${1:-}" in
+    start|restart) ;;
+    status)
+        date -u '+system_time_utc=%Y-%m-%dT%H:%M:%SZ'
+        if [ -r "$SERVERS" ]; then sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' "$SERVERS" | sed 's/^/server=/' ; fi
+        if command -v chronyc >/dev/null 2>&1; then
+            chronyc tracking || true
+            chronyc sources -v || true
+        fi
+        exit 0 ;;
+    *) echo "usage: $0 {start|restart|status}" >&2; exit 1 ;;
+esac
+
+[ -s "$SERVERS" ] || exit 0
+command -v chronyd >/dev/null 2>&1 || { echo 'chronyd unavailable' >&2; exit 1; }
+tmp="$CONFIG.xtntp.$$"
+trap 'rm -f "$tmp"' EXIT HUP INT TERM
+{
+    echo '# Generated from /userdata/xtapp/ntp-servers.conf by S50xtntp'
+    count=0
+    while IFS= read -r server || [ -n "$server" ]; do
+        case "$server" in ''|\#*) continue ;; esac
+        case "$server" in *[!a-zA-Z0-9.-]*|.*|*..*|*-*-) echo "invalid NTP server: $server" >&2; exit 1 ;; esac
+        echo "server $server iburst"
+        count=$((count + 1))
+    done < "$SERVERS"
+    [ "$count" -gt 0 ] || { echo 'no NTP server configured' >&2; exit 1; }
+    echo 'driftfile /var/lib/chrony/drift'
+    echo 'makestep 1.0 3'
+    echo 'rtcsync'
+} > "$tmp"
+chmod 644 "$tmp"
+if cmp -s "$tmp" "$CONFIG"; then exit 0; fi
+mv "$tmp" "$CONFIG"
+trap - EXIT HUP INT TERM
+/etc/init.d/S49chrony restart
