@@ -30,6 +30,7 @@
 #include <iterator>
 #include <map>
 #include <mutex>
+#include <condition_variable>
 #include <fstream>
 #include <sstream>
 
@@ -37,6 +38,7 @@
 #include <sys/un.h>
 #include <sys/select.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <net/if.h>
 #include <unistd.h>
@@ -60,6 +62,7 @@
 #include "request_parser.hpp"
 #include "publish_queue.hpp"
 #include "embedded_web.hpp"
+#include "xt_m60_filter.hpp"
 
 // ==================== 配置 ====================
 static const char *RADAR_IP = "192.0.2.101";
@@ -68,7 +71,7 @@ static const int UDP_PORT = 7687;
 static const char *BOARD_IP = "192.0.2.179"; // 板子 eth0(雷达直连)辅助地址; 雷达 UDP 目标
 static const char *RADAR_IF = "eth0";          // 雷达所在网口(多播组加入接口)
 static std::string g_radar_source, g_radar_interface;
-static const char *SN_FILE = "/mnt/system/factory-data/Legacy.yaml";
+static const char *SN_FILE = getenv("XT_DEVICE_SN_FILE") ? getenv("XT_DEVICE_SN_FILE") : "/mnt/system/factory-data/Legacy.yaml";
 static std::string g_sn;
 static double PC_HZ = 5.0;
 static const int64_t PC_SCALER = 1000;
@@ -88,10 +91,10 @@ static z_owned_publisher_t g_pub_img_compat;
 static z_owned_publisher_t g_pub_pc_preview;
 static bool g_legacy_compat_enabled = false;
 static bool g_legacy_axes = false;
-static std::string g_legacy_sn;
+static std::string g_legacy_legacy_sn;
 static int g_legacy_http_port = 8080;
 static int g_legacy_image_batch_size = 3;
-static bool g_legacy_only = false;
+static bool g_legacy_legacy_only = false;
 static bool g_preview_enabled = false;
 // Keep one owned queryable per exact command key.  zenoh-pico 1.10.0 and the
 // full zenoh 1.10 client are not reliably interoperable when a reply is sent
@@ -123,6 +126,15 @@ static int g_point_ingest_fd = -1;
 static uint64_t g_gateway_started_ms = 0;
 static std::atomic<uint64_t> g_web_image_frames{0}, g_web_image_bytes{0}, g_web_image_last_ms{0};
 static std::atomic<uint64_t> g_web_pointcloud_frames{0}, g_web_pointcloud_bytes{0}, g_web_pointcloud_last_ms{0};
+// Exact ImageMsgArray bytes from the last successful Zenoh image put.
+// The HTTP preview samples this cache; it does not start another camera encoder.
+static std::mutex g_protocol_image_mtx;
+static std::vector<uint8_t> g_protocol_image_payload;
+static std::vector<uint8_t> g_protocol_image_jpeg;
+static uint64_t g_protocol_image_published_ms = 0;
+static uint64_t g_protocol_image_generation = 0;
+static uint32_t g_protocol_image_seq = 0;
+static std::condition_variable g_protocol_image_cv;
 
 static const char *PLACEHOLDER_CALIBRATION = R"json({
   "calibration_status": "placeholder",
@@ -510,6 +522,33 @@ static bool configure_radar_udp() {
     }
     return true;
 }
+// lidar_fps is the hardware measurement ceiling as well as the protocol
+// publication ceiling. The previous build only throttled publication, leaving
+// XT-M60 at its factory frame-rate setting (about 10 Hz on this device).
+static bool configure_radar_max_fps() {
+    const int requested = std::max(1, std::min(30, int(PC_HZ)));
+    std::vector<uint8_t> response;
+    const bool accepted = radar_cmd(56, {uint8_t(requested)}, response);
+    printf("[radar] setMaxFps=%d accepted=%d response_bytes=%zu\n",
+           requested, accepted, response.size());
+
+    // CMD_GET_CONFIG (5), same packed DevCfg_t fields used by the vendor SDK.
+    // Offsets 40/41 are setfps/usefps; log them to verify the sensor accepted
+    // the requested rate without making readback failure fatal to acquisition.
+    std::vector<uint8_t> config;
+    if (radar_cmd(5, {}, config) && config.size() >= 42 &&
+        memcmp(config.data(), "\x52\xaa\xcc\x33", 4) == 0) {
+        printf("[radar] config readback hdr=%u reduce=%u setfps=%u usefps=%u freq=%u,%u,%u,%u,%u integ_raw=%02x%02x,%02x%02x,%02x%02x,%02x%02x,%02x%02x\n",
+               unsigned(config[9]), unsigned(config[39]), unsigned(config[40]), unsigned(config[41]),
+               unsigned(config[10]), unsigned(config[11]), unsigned(config[12]),
+               unsigned(config[13]), unsigned(config[14]), unsigned(config[16]), unsigned(config[15]),
+               unsigned(config[18]), unsigned(config[17]), unsigned(config[20]), unsigned(config[19]),
+               unsigned(config[22]), unsigned(config[21]), unsigned(config[24]), unsigned(config[23]));
+    } else {
+        printf("[radar] maxFps readback unavailable bytes=%zu\n", config.size());
+    }
+    return accepted;
+}
 
 // ==================== 雷达 UDP 数据接收/组帧 ====================
 struct FrameBuf {
@@ -721,7 +760,7 @@ static void build_maptable() {
     }
 }
 
-static void compute_points(const std::vector<uint32_t> &dist, const std::vector<uint16_t> &amp,
+static xt_m60::Counts compute_points(const std::vector<uint32_t> &dist, const std::vector<uint16_t> &amp,
                            uint16_t width, uint16_t height, const FrameInfo &info,
                            std::vector<float> &px, std::vector<float> &py, std::vector<float> &pz,
                            std::vector<uint8_t> &inten) {
@@ -736,6 +775,18 @@ static void compute_points(const std::vector<uint32_t> &dist, const std::vector<
     if (info.binning & 0x02) binning_div *= 2.0f;
     refcoef /= binning_div;
 
+    std::vector<uint8_t> corner(n, 0);
+    for (uint32_t i = 0; i < n; ++i) {
+        const uint32_t p = i / width, q = i % width;
+        int index = (int(p) + info.roiy[0]) * g_sensor_w + int(q) + info.roix[0];
+        if (index >= g_sensor_w * g_sensor_h) index = g_sensor_w * g_sensor_h - 1;
+        index = (index / g_sensor_w) * g_sensor_w + g_sensor_w - 1 - index % g_sensor_w;
+        corner[i] = g_mapdel[index] ? 1 : 0;
+    }
+    std::vector<xt_m60::Reject> reject;
+    const auto counts = xt_m60::classify(dist, amp, corner, width, height,
+                                          info.miniAmp, reject);
+
     for (uint32_t i = 0; i < n; i++) {
         uint32_t curdis = dist[i];
         uint32_t p = i / width, q = i % width;
@@ -743,8 +794,7 @@ static void compute_points(const std::vector<uint32_t> &dist, const std::vector<
         if (index >= g_sensor_w * g_sensor_h) index = g_sensor_w * g_sensor_h - 1;
         index = (index / g_sensor_w) * g_sensor_w + g_sensor_w - 1 - index % g_sensor_w; // 左右翻转
 
-        if (g_mapdel[index]) { curdis = 0; }
-        if (curdis >= 964000 || curdis == 0) {
+        if (reject[i] != xt_m60::Reject::valid) {
             px.push_back(NAN); py.push_back(NAN); pz.push_back(NAN); inten.push_back(0);
             continue;
         }
@@ -770,17 +820,18 @@ static void compute_points(const std::vector<uint32_t> &dist, const std::vector<
         if (refl < 0) refl = 0;
         if (refl > 255) refl = 255;
         if (g_legacy_axes) {
-            // Native XT-M60 optical-like frame: +X right, +Y up, +Z forward.
-            // legacy/robotics frame consumed by the legacy software:
-            // +X forward, +Y left, +Z up.
+            // The XT-M60 native X axis points left (manufacturer Camera mode).
+            // Publish +X forward, +Y left, +Z up. Negating native X here
+            // mirrored the horizontal axis and made the cloud left-handed.
             px.push_back((float)z);
-            py.push_back((float)-x);
+            py.push_back((float)x);
             pz.push_back((float)y);
         } else {
             px.push_back((float)x); py.push_back((float)y); pz.push_back((float)z);
         }
         inten.push_back((uint8_t)lround(refl));
     }
+    return counts;
 }
 
 // ==================== Zenoh queryable 回调 ====================
@@ -843,6 +894,8 @@ struct RadarPublication {
     uint64_t queued_ms = 0, frame = 0;
     uint32_t seq = 0;
     size_t total = 0, valid = 0;
+    xt_m60::Counts filter_counts;
+    uint16_t mini_amp = 0;
     int temperature[2] = {};
     unsigned devstate = 0;
     int64_t source_stamp_us = 0;
@@ -856,30 +909,93 @@ static PublishQueue<RadarPublication, 32> g_image_publications;
 static PublishQueue<RadarPublication, 32> g_pointcloud_publications;
 static std::atomic<uint64_t> g_publish_expired{0}, g_publish_errors{0}, g_put_max_ms{0};
 
+static bool pb_read_varint(const std::vector<uint8_t> &b, size_t &p, size_t end, uint64_t &v) {
+    v = 0; unsigned shift = 0;
+    while (p < end && shift < 70) { const uint8_t c = b[p++]; v |= uint64_t(c & 0x7f) << shift;
+        if (!(c & 0x80)) return true; shift += 7; }
+    return false;
+}
+static bool pb_next_field(const std::vector<uint8_t> &b, size_t &p, size_t end,
+                          uint32_t &number, uint32_t &wire, size_t &start, size_t &length) {
+    uint64_t tag = 0, value = 0;
+    if (!pb_read_varint(b, p, end, tag) || tag == 0) return false;
+    number = uint32_t(tag >> 3); wire = uint32_t(tag & 7); start = p; length = 0;
+    if (wire == 0) { if (!pb_read_varint(b, p, end, value)) return false; length = p - start; return true; }
+    if (wire == 1) length = 8;
+    else if (wire == 5) length = 4;
+    else if (wire == 2) { if (!pb_read_varint(b, p, end, value) || value > end - p) return false; start = p; length = size_t(value); }
+    else return false;
+    if (length > end - p) return false;
+    p += length; return true;
+}
+// Extract the exact JPEG bytes and sequence from the ImageMsgArray that was
+// just successfully published. This is transport-only; it does not re-encode.
+static bool extract_protocol_jpeg(const std::vector<uint8_t> &payload,
+                                  std::vector<uint8_t> &jpeg, uint32_t &seq) {
+    size_t p = 0;
+    while (p < payload.size()) {
+        uint32_t n, w; size_t s, len;
+        if (!pb_next_field(payload, p, payload.size(), n, w, s, len)) return false;
+        if (n != 1 || w != 2) continue;
+        size_t q = s, end = s + len, data_s = 0, data_n = 0; uint32_t format = 0; seq = 0;
+        while (q < end) {
+            uint32_t fn, fw; size_t fs, fl;
+            if (!pb_next_field(payload, q, end, fn, fw, fs, fl)) return false;
+            if (fn == 1 && fw == 2) {
+                size_t h = fs, he = fs + fl;
+                while (h < he) { uint32_t hn, hw; size_t hs, hl;
+                    if (!pb_next_field(payload, h, he, hn, hw, hs, hl)) return false;
+                    if (hn == 1 && hw == 0) { size_t v = hs; uint64_t x;
+                        if (!pb_read_varint(payload, v, hs + hl, x)) return false; seq = uint32_t(x); }
+                }
+            } else if (fn == 2 && fw == 0) { size_t v = fs; uint64_t x;
+                if (!pb_read_varint(payload, v, fs + fl, x)) return false; format = uint32_t(x);
+            } else if (fn == 5 && fw == 2) { data_s = fs; data_n = fl; }
+        }
+        if (format != 2 || data_n < 4 || payload[data_s] != 0xff || payload[data_s + 1] != 0xd8 ||
+            payload[data_s + data_n - 2] != 0xff || payload[data_s + data_n - 1] != 0xd9) return false;
+        jpeg.assign(payload.begin() + data_s, payload.begin() + data_s + data_n); return true;
+    }
+    return false;
+}
+
 static void radar_publisher_main(PublishQueue<RadarPublication, 32> &queue) {
     RadarPublication job;
     std::vector<uint8_t> compat_image_batch;
+    std::vector<uint8_t> published_image_payload;
     int compat_image_count = 0;
     while (true) {
         if (!queue.pop(job)) continue;
+        published_image_payload.clear();
         const auto start = now_ms();
         if (start - job.queued_ms > 600) { ++g_publish_expired; continue; }
         if (g_ingest_only) {
             const int result = send_pointcloud_payload(job.data);
             if (result != Z_OK) ++g_publish_errors;
             if (job.pointcloud) pc_stream_send(job.seq, job.data);
+            if (job.pointcloud && (job.seq % 25 == 0 || result != Z_OK)) {
+                printf("[filter] seq=%u frame=%llu raw=%u valid=%u mini_amp=%u zero=%u invalid_distance=%u invalid_amplitude=%u below_min_amp=%u corner=%u flying=%u isolated_weak=%u bytes=%zu send_ret=%d\n",
+                    job.seq, (unsigned long long)job.frame,
+                    job.filter_counts.raw, job.filter_counts.valid, unsigned(job.mini_amp),
+                    job.filter_counts.zero_distance, job.filter_counts.invalid_distance,
+                    job.filter_counts.invalid_amplitude, job.filter_counts.below_min_amp,
+                    job.filter_counts.corner, job.filter_counts.flying_pixel,
+                    job.filter_counts.isolated_weak_pixel, job.data.size(), result);
+            }
             continue;
         }
         int result = Z_OK;
-        if (!g_legacy_only || job.pointcloud) {
+        if (!g_legacy_legacy_only || job.pointcloud) {
             z_owned_bytes_t payload;
             z_bytes_copy_from_buf(&payload, job.data.data(), job.data.size());
             result = job.pointcloud ? z_publisher_put(z_loan(g_pub_pc), z_move(payload), NULL) :
                 z_publisher_put(z_loan(g_pub_img), z_move(payload), NULL);
+            if (job.image) published_image_payload = job.data;
         } else {
             compat_image_batch.insert(compat_image_batch.end(), job.data.begin(), job.data.end());
             ++compat_image_count;
             if (compat_image_count >= g_legacy_image_batch_size) {
+                published_image_payload = compat_image_batch;
                 z_owned_bytes_t payload;
                 z_bytes_copy_from_buf(&payload, compat_image_batch.data(), compat_image_batch.size());
                 result = z_publisher_put(z_loan(g_pub_img), z_move(payload), NULL);
@@ -888,7 +1004,7 @@ static void radar_publisher_main(PublishQueue<RadarPublication, 32> &queue) {
             }
         }
         int compat_result = Z_OK;
-        if (g_legacy_compat_enabled && !g_legacy_only) {
+        if (g_legacy_compat_enabled && !g_legacy_legacy_only) {
             if (job.pointcloud) {
                 z_owned_bytes_t compat_payload;
                 z_bytes_copy_from_buf(&compat_payload, job.data.data(), job.data.size());
@@ -911,6 +1027,19 @@ static void radar_publisher_main(PublishQueue<RadarPublication, 32> &queue) {
             }
         }
         if (result != Z_OK) ++g_publish_errors;
+        if (job.image && result == Z_OK && !published_image_payload.empty()) {
+            std::vector<uint8_t> jpeg; uint32_t image_seq = 0;
+            const bool have_jpeg = extract_protocol_jpeg(published_image_payload, jpeg, image_seq);
+            {
+                std::lock_guard<std::mutex> lock(g_protocol_image_mtx);
+                g_protocol_image_payload.swap(published_image_payload);
+                g_protocol_image_jpeg.swap(jpeg);
+                g_protocol_image_seq = image_seq;
+                g_protocol_image_published_ms = now_ms();
+                ++g_protocol_image_generation;
+            }
+            g_protocol_image_cv.notify_all();
+        }
         int preview_result = Z_OK;
         if (job.pointcloud) {
             pc_stream_send(job.seq, job.data);
@@ -924,8 +1053,12 @@ static void radar_publisher_main(PublishQueue<RadarPublication, 32> &queue) {
         const auto elapsed = now_ms() - start;
         if (elapsed > g_put_max_ms.load()) g_put_max_ms = elapsed;
         if (job.pointcloud && (job.seq % 25 == 0 || result != Z_OK || elapsed > 200)) {
-            printf("[zenoh] pointcloud seq=%u frame=%llu total=%zu valid=%zu bytes=%zu put_ret=%d compat_ret=%d preview_bytes=%zu preview_ret=%d temp_raw=%d,%d devstate=%u source_stamp_us=%lld raw_sensor_timestamp_ms=%llu queue_ms=%llu put_ms=%llu\n",
-                job.seq, (unsigned long long)job.frame, job.total, job.valid, job.data.size(), result,
+            printf("[zenoh] pointcloud seq=%u frame=%llu total=%zu valid=%zu mini_amp=%u zero=%u invalid_distance=%u invalid_amplitude=%u below_min_amp=%u corner=%u flying=%u isolated_weak=%u bytes=%zu put_ret=%d compat_ret=%d preview_bytes=%zu preview_ret=%d temp_raw=%d,%d devstate=%u source_stamp_us=%lld raw_sensor_timestamp_ms=%llu queue_ms=%llu put_ms=%llu\n",
+                job.seq, (unsigned long long)job.frame, job.total, job.valid, unsigned(job.mini_amp),
+                job.filter_counts.zero_distance, job.filter_counts.invalid_distance,
+                job.filter_counts.invalid_amplitude, job.filter_counts.below_min_amp,
+                job.filter_counts.corner, job.filter_counts.flying_pixel,
+                job.filter_counts.isolated_weak_pixel, job.data.size(), result,
                 compat_result, job.preview.size(), preview_result, job.temperature[0], job.temperature[1], job.devstate,
                 (long long)job.source_stamp_us, (unsigned long long)job.raw_sensor_timestamp_ms,
                 (unsigned long long)(start-job.queued_ms), (unsigned long long)elapsed);
@@ -1081,16 +1214,69 @@ static xt::Json management_config_json() {
     const auto current = interface_info(iface);
     const auto network = read_shell_config("/userdata/xtapp/management-network.conf");
     const auto time_config = read_shell_config("/userdata/xtapp/management-time.conf");
+    const auto time_role = read_shell_config("/userdata/xtapp/time-role.conf");
     const auto mobile = read_shell_config("/userdata/xtapp/management-mobile.conf");
+    const bool rtc_master = time_role.count("TIME_ROLE") && time_role.at("TIME_ROLE") == "rtc_master";
     const std::string mode = network.count("NETWORK_MODE") ? network.at("NETWORK_MODE") : "static";
     const std::string ip = network.count("NETWORK_IP") ? network.at("NETWORK_IP") : current.value("ip", "");
     const int prefix = network.count("NETWORK_PREFIX") ? atoi(network.at("NETWORK_PREFIX").c_str()) : current.value("prefix", 24);
     return {{"network", {{"mode", mode}, {"interface", iface}, {"ip", ip}, {"prefix", prefix},
                 {"gateway", network.count("NETWORK_GATEWAY") ? network.at("NETWORK_GATEWAY") : ""},
                 {"dns", split_csv(network.count("NETWORK_DNS") ? network.at("NETWORK_DNS") : "")}}},
-            {"time", {{"ntp", split_csv(time_config.count("NTP_SERVERS") ? time_config.at("NTP_SERVERS") : "203.0.113.200")},
+            {"time", {{"role", rtc_master ? "rtc_master" : "client"},
+                {"serve", rtc_master && time_role.count("NTP_SERVER_ADDRESS") ? time_role.at("NTP_SERVER_ADDRESS") + ":123" : ""},
+                {"ntp", rtc_master ? std::vector<std::string>{} : split_csv(time_config.count("NTP_SERVERS") ? time_config.at("NTP_SERVERS") : "")},
                 {"timezone", time_config.count("TIMEZONE") ? time_config.at("TIMEZONE") : "Asia/Shanghai"}}},
             {"mobile", {{"apn", mobile.count("MOBILE_APN") ? mobile.at("MOBILE_APN") : ""}}}};
+}
+
+struct CpuUsageSnapshot {
+    xt::Json total = nullptr;
+    xt::Json cores = xt::Json::array();
+    xt::Json interval_ms = nullptr;
+};
+
+static CpuUsageSnapshot sample_cpu_usage(uint64_t sample_ms) {
+    struct Counters { uint64_t total = 0, idle = 0; };
+    static std::mutex sample_mtx;
+    static std::map<std::string, Counters> previous;
+    static uint64_t previous_ms = 0;
+    static CpuUsageSnapshot cached;
+    std::lock_guard<std::mutex> lock(sample_mtx);
+    // Multiple browser clients should see the same one-second sample rather
+    // than shortening each other's /proc/stat delta to a few milliseconds.
+    if (previous_ms && sample_ms - previous_ms < 1000) return cached;
+    std::ifstream file("/proc/stat");
+    if (!file) return cached;
+    CpuUsageSnapshot next;
+    std::map<std::string, Counters> current;
+    std::string line;
+    while (std::getline(file, line)) {
+        std::istringstream in(line);
+        std::string name;
+        uint64_t user=0,nice=0,system=0,idle=0,iowait=0,irq=0,softirq=0,steal=0;
+        if (!(in >> name) || name.compare(0, 3, "cpu") != 0) break;
+        if (!(in >> user >> nice >> system >> idle >> iowait >> irq >> softirq >> steal)) continue;
+        const Counters now{user+nice+system+idle+iowait+irq+softirq+steal, idle+iowait};
+        current[name] = now;
+        xt::Json percent = nullptr;
+        auto old = previous.find(name);
+        if (old != previous.end() && now.total > old->second.total && now.idle >= old->second.idle) {
+            const auto total_delta = now.total - old->second.total;
+            const auto idle_delta = now.idle - old->second.idle;
+            percent = std::round(1000.0 * (total_delta - std::min(total_delta, idle_delta)) / total_delta) / 10.0;
+        }
+        if (name == "cpu") next.total = percent;
+        else if (name.size() > 3 && std::all_of(name.begin()+3, name.end(), [](char ch){ return std::isdigit(static_cast<unsigned char>(ch)); }))
+            next.cores.push_back(percent);
+    }
+    if (!current.empty()) {
+        if (previous_ms) next.interval_ms = sample_ms - previous_ms;
+        previous = std::move(current);
+        previous_ms = sample_ms;
+        cached = next;
+    }
+    return cached;
 }
 
 static xt::Json management_status_json() {
@@ -1111,27 +1297,23 @@ static xt::Json management_status_json() {
     { std::ifstream f("/proc/meminfo"); std::string key, unit; uint64_t value; while (f >> key >> value >> unit) {
         if (key == "MemTotal:") mem_total = value; else if (key == "MemAvailable:") mem_available = value;
     }}
-    static uint64_t previous_cpu_total = 0, previous_cpu_idle = 0;
-    xt::Json cpu_usage = nullptr;
-    {
-        std::ifstream f("/proc/stat"); std::string label;
-        uint64_t user=0,nice=0,system=0,idle=0,iowait=0,irq=0,softirq=0,steal=0;
-        if (f >> label >> user >> nice >> system >> idle >> iowait >> irq >> softirq >> steal && label == "cpu") {
-            const uint64_t total=user+nice+system+idle+iowait+irq+softirq+steal, idle_all=idle+iowait;
-            if (previous_cpu_total && total > previous_cpu_total && idle_all >= previous_cpu_idle) {
-                const uint64_t total_delta=total-previous_cpu_total, idle_delta=idle_all-previous_cpu_idle;
-                cpu_usage=std::round(1000.0 * (total_delta-idle_delta) / total_delta) / 10.0;
-            }
-            previous_cpu_total=total; previous_cpu_idle=idle_all;
-        }
-    }
+    const CpuUsageSnapshot cpu = sample_cpu_usage(sample);
     xt::Json temperature = nullptr;
+    xt::Json temperature_source = nullptr;
+    xt::Json temperature_raw_millicelsius = nullptr;
     for (int zone=0; zone<16; ++zone) {
-        std::ifstream f("/sys/class/thermal/thermal_zone" + std::to_string(zone) + "/temp");
-        double value=0; if (!(f >> value)) continue;
-        if (value > 1000) value /= 1000.0;
-        if (value > -20 && value < 150 && (temperature.is_null() || value > temperature.get<double>()))
-            temperature=std::round(value*10.0)/10.0;
+        const std::string base = "/sys/class/thermal/thermal_zone" + std::to_string(zone) + "/";
+        std::ifstream type_file(base + "type"), temp_file(base + "temp");
+        std::string type;
+        long long raw = 0;
+        if (!(type_file >> type) || !(temp_file >> raw)) continue;
+        if (type.find("soc") == std::string::npos && type.find("cpu") == std::string::npos) continue;
+        const double value = std::abs(raw) > 1000 ? raw / 1000.0 : double(raw);
+        if (value > -20 && value < 150 && (temperature.is_null() || value > temperature.get<double>())) {
+            temperature = std::round(value * 10.0) / 10.0;
+            temperature_source = type;
+            temperature_raw_millicelsius = std::abs(raw) > 1000 ? raw : raw * 1000;
+        }
     }
     char rendered[32] = {};
     // Match the legacy device UI/API: display China Standard Time regardless
@@ -1139,16 +1321,20 @@ static xt::Json management_status_json() {
     time_t wall = time(nullptr) + 8 * 60 * 60; tm local{}; gmtime_r(&wall, &local);
     strftime(rendered, sizeof rendered, "%Y-%m-%d %H:%M:%S", &local);
     xt::Json active;
-    { std::lock_guard<std::mutex> lock(g_config_mtx); active = g_active_config; }
+    // Settings update g_config immediately and restart the affected service;
+    // g_active_config is only the snapshot loaded at gateway startup.
+    { std::lock_guard<std::mutex> lock(g_config_mtx); active = g_config; }
     const auto sensors = active.value("sensors", xt::Json::object());
     const int image_format = sensors.value("image_format", 1);
     const std::string format_name = image_format == 2 ? "JPEG" : "H264";
     const auto age = [sample](uint64_t last) -> xt::Json { return last ? xt::Json(sample - last) : xt::Json(nullptr); };
     return {{"sample_ms", sample},
-        {"device", {{"sn", g_legacy_sn.empty() ? g_sn : g_legacy_sn}, {"model", "RK3562 Spatial Camera"},
+        {"device", {{"sn", g_legacy_legacy_sn.empty() ? g_sn : g_legacy_legacy_sn}, {"model", "RK3562 Spatial Camera"},
             {"time", rendered}, {"web_version", "1.0.0"}}},
         {"system", {{"uptime_s", static_cast<uint64_t>(uptime)}, {"gateway_uptime_s", (sample - g_gateway_started_ms) / 1000},
-            {"loadavg", load}, {"cpu_usage_pct", cpu_usage}, {"temperature_c", temperature},
+            {"loadavg", load}, {"cpu_usage_pct", cpu.total}, {"cpu_cores_pct", cpu.cores},
+            {"cpu_sample_interval_ms", cpu.interval_ms}, {"temperature_c", temperature},
+            {"temperature_source", temperature_source}, {"temperature_raw_millicelsius", temperature_raw_millicelsius},
             {"memory_used_pct", mem_total ? int((mem_total - mem_available) * 100 / mem_total) : 0}}},
         {"network", {{"management", management}, {"radar", interface_info(g_radar_interface)}, {"mobile", mobile}}},
         {"sensors", {
@@ -1213,6 +1399,51 @@ static void http_reply(int client, int code, const char *content_type, const std
     write_all(client, reinterpret_cast<const uint8_t *>(body.data()), body.size());
 }
 
+static int restart_camera_service_isolated();
+
+static void protocol_jpeg_stream(int client, int max_fps) {
+    int one = 1; setsockopt(client, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    const std::string header =
+        "HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=xtjpegframe\r\n"
+        "Cache-Control: no-store, no-cache, must-revalidate\r\nPragma: no-cache\r\n"
+        "X-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n";
+    if (!write_all(client, reinterpret_cast<const uint8_t *>(header.data()), header.size())) { close(client); return; }
+    uint64_t seen = 0;
+    const auto period = std::chrono::milliseconds(1000 / std::clamp(max_fps, 1, 20));
+    auto next_send = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> lock(g_protocol_image_mtx);
+        seen = g_protocol_image_generation ? g_protocol_image_generation - 1 : 0;
+    }
+    while (true) {
+        std::vector<uint8_t> jpeg; uint32_t seq = 0; uint64_t generation = 0;
+        {
+            std::unique_lock<std::mutex> lock(g_protocol_image_mtx);
+            if (g_protocol_image_generation == seen) g_protocol_image_cv.wait_for(lock, std::chrono::seconds(2), [&] {
+                return g_protocol_image_generation != seen;
+            });
+            while (g_protocol_image_generation != seen && std::chrono::steady_clock::now() < next_send)
+                g_protocol_image_cv.wait_until(lock, next_send);
+            if (g_protocol_image_generation == seen) continue;
+            generation = g_protocol_image_generation;
+            if (g_protocol_image_published_ms && now_ms() - g_protocol_image_published_ms < 1000)
+                jpeg = g_protocol_image_jpeg;
+            seq = g_protocol_image_seq;
+            seen = generation;
+        }
+        if (jpeg.empty()) continue;
+        const std::string part = "--xtjpegframe\r\nContent-Type: image/jpeg\r\nContent-Length: " +
+            std::to_string(jpeg.size()) + "\r\nX-Sequence: " + std::to_string(seq) + "\r\n\r\n";
+        if (!write_all(client, reinterpret_cast<const uint8_t *>(part.data()), part.size()) ||
+            !write_all(client, jpeg.data(), jpeg.size()) ||
+            !write_all(client, reinterpret_cast<const uint8_t *>("\r\n"), 2)) break;
+        next_send += period;
+        const auto now = std::chrono::steady_clock::now();
+        if (next_send < now) next_send = now + period;
+    }
+    close(client);
+}
+
 static void compatibility_http_main() {
     // Keep the legacy GET /api/device contract while serving the management UI.
     int listener = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -1230,7 +1461,7 @@ static void compatibility_http_main() {
         return;
     }
     printf("[compat-http] listening 0.0.0.0:%d /api/device legacy_sn=%s\n",
-           g_legacy_http_port, g_legacy_sn.c_str());
+           g_legacy_http_port, g_legacy_legacy_sn.c_str());
     while (true) {
         int client = accept4(listener, nullptr, nullptr, SOCK_CLOEXEC);
         if (client < 0) { if (errno == EINTR) continue; continue; }
@@ -1239,6 +1470,7 @@ static void compatibility_http_main() {
         timeval timeout{2, 0};
         setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
         setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+        bool handed_off = false;
         HttpRequest request;
         if (!read_http_request(client, request)) { close(client); continue; }
         try {
@@ -1250,12 +1482,51 @@ static void compatibility_http_main() {
                 char rendered[32] = {}; strftime(rendered, sizeof(rendered), "%Y-%m-%d %H:%M:%S", &local);
                 const bool five_g = file_exists("/sys/class/net/wwan0") || file_exists("/sys/class/net/usb0");
                 xt::Json response = {{"eth0", interface_info("eth0").value("up", false)}, {"fiveG", five_g},
-                    {"sn", g_legacy_sn}, {"time", rendered}};
+                    {"sn", g_legacy_legacy_sn}, {"time", rendered}};
                 http_reply(client, 200, "application/json; charset=utf-8", response.dump(4) + "\n");
             } else if (request.method == "GET" && path == "/api/management/status") {
                 http_reply(client, 200, "application/json; charset=utf-8", management_status_json().dump() + "\n");
+            } else if (request.method == "GET" && path == "/api/management/protocol-image.bin") {
+                std::string payload;
+                {
+                    std::lock_guard<std::mutex> lock(g_protocol_image_mtx);
+                    if (g_protocol_image_published_ms && now_ms() - g_protocol_image_published_ms < 3000)
+                        payload.assign(g_protocol_image_payload.begin(), g_protocol_image_payload.end());
+                }
+                if (payload.empty()) http_reply(client, 204, "application/octet-stream", "");
+                else http_reply(client, 200, "application/octet-stream", payload);
+            } else if (request.method == "GET" && path == "/api/management/protocol-image.mjpeg") {
+                handed_off = true;
+                const int max_fps = request.target.find("fps=20") != std::string::npos ? 20 : 10;
+                std::thread(protocol_jpeg_stream, client, max_fps).detach();
             } else if (request.method == "GET" && path == "/api/management/config") {
                 http_reply(client, 200, "application/json; charset=utf-8", management_config_json().dump() + "\n");
+            } else if (request.method == "POST" && path == "/api/management/image-format") {
+                const auto data = xt::Json::parse(request.body);
+                const std::string format = data.value("format", "");
+                if (format != "JPEG" && format != "H264") {
+                    http_reply(client, 400, "application/json; charset=utf-8", "{\"error\":\"format must be JPEG or H264\"}");
+                } else {
+                    bool changed = false;
+                    {
+                        std::lock_guard<std::mutex> lock(g_config_mtx);
+                        auto candidate = g_config;
+                        candidate["sensors"]["image_format"] = format == "JPEG" ? 2 : 3;
+                        xt::validate(candidate);
+                        if (candidate != g_config) {
+                            xt::save_config(candidate);
+                            g_config = candidate;
+                            g_files_requested = true;
+                            changed = true;
+                        }
+                    }
+                    http_reply(client, 200, "application/json; charset=utf-8",
+                        xt::Json({{"format", format}, {"camera_restart_scheduled", changed}}).dump() + "\n");
+                    if (changed) std::thread([] {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                        printf("[cfg] camera-only restart for image format status=%d\n", restart_camera_service_isolated());
+                    }).detach();
+                }
             } else if (request.method == "GET" && path == "/api/management/logs") {
                 std::string service = "gateway";
                 const auto pos = request.target.find("service=");
@@ -1292,6 +1563,9 @@ static void compatibility_http_main() {
                 std::string servers; if (data.contains("ntp")) for (const auto &entry : data.at("ntp")) {
                     const auto value = entry.get<std::string>(); if (!valid_host(value)) throw std::runtime_error("invalid NTP server"); if (!servers.empty()) servers += ','; servers += value;
                 }
+                const auto time_role = read_shell_config("/userdata/xtapp/time-role.conf");
+                if (time_role.count("TIME_ROLE") && time_role.at("TIME_ROLE") == "rtc_master" && !servers.empty())
+                    throw std::runtime_error("this device serves RTC time; upstream NTP is disabled");
                 xt::atomic_write("/userdata/xtapp/management-time.conf", "TIMEZONE='" + timezone + "'\nNTP_SERVERS='" + servers + "'\n");
                 http_reply(client, 202, "application/json; charset=utf-8", "{\"ok\":true}\n"); run_management_action("time");
             } else if (request.method == "POST" && path == "/api/management/apn") {
@@ -1311,7 +1585,7 @@ static void compatibility_http_main() {
         } catch (const std::exception &e) {
             http_reply(client, 400, "application/json; charset=utf-8", xt::Json({{"ok", false}, {"error", e.what()}}).dump() + "\n");
         }
-        close(client);
+        if (!handed_off) close(client);
     }
 }
 
@@ -1497,7 +1771,7 @@ static void query_handler(z_loaned_query_t *query, void *arg) {
             for (size_t i=0; i<values.size(); ++i) {
                 if (values[i] == 0) continue;
                 int32_t v = values[i];
-                // SettingRequest.image_format is the legacy space
+                // SettingRequest.image_format is the LEGACY legacy space
                 // (0=no change, 1=H264, 2=JPEG) while config.json stores the
                 // ImageMsg.format space (2=JPEG, 3=H264). Translate at the
                 // boundary so the config file never contradicts the wire.
@@ -1583,10 +1857,10 @@ int main(int argc, char **argv) {
         xt::configure_protocol_clock(g_config.value("timestamp_mode", "monotonic"));
         const auto compat = g_config.value("legacy_compatibility", xt::Json::object());
         g_legacy_compat_enabled = compat.value("enabled", false);
-        g_legacy_sn = compat.value("legacy_sn", "LEGACY00000001");
+        g_legacy_legacy_sn = compat.value("legacy_sn", "LEGACY00000001");
         g_legacy_http_port = compat.value("http_port", 8080);
         g_legacy_image_batch_size = compat.value("image_batch_size", 3);
-        g_legacy_only = compat.value("legacy_topics_only", false);
+        g_legacy_legacy_only = compat.value("legacy_topics_only", false);
         g_legacy_strict_setting_response = compat.value("strict_setting_response", false);
         g_legacy_axes = compat.value("pointcloud_axes", "native") == "legacy_x_forward_y_left_z_up";
         if (argc == 4 && strcmp(argv[1],"--network")==0) {
@@ -1673,46 +1947,49 @@ int main(int argc, char **argv) {
     printf("[zenoh] 会话已打开 (peer 模式)\n");
 
     char key[160];
-    const std::string stream_sn = g_legacy_compat_enabled && g_legacy_only ?
-        g_legacy_sn : g_sn;
+    const std::string stream_sn = g_legacy_compat_enabled && g_legacy_legacy_only ?
+        g_legacy_legacy_sn : g_sn;
     snprintf(key, sizeof key, "active/%s/image", stream_sn.c_str());
     z_owned_keyexpr_t ke_img;
     z_keyexpr_from_str(&ke_img, key);
-    auto image_qos = g_legacy_only ? xt::fragmented_reliable_data_qos() :
-        xt::fragmented_sensor_data_qos();
+    // Each JPEG frame is split into many Zenoh fragments. Best-effort fragment
+    // delivery loses the entire ImageMsg when even one fragment is missed;
+    // use the reliable wire mode for the customer-facing image topic. Image
+    // and pointcloud have independent publication workers/queues, so reliable
+    // backpressure here cannot consume pointcloud queue capacity.
+    auto image_qos = xt::fragmented_reliable_data_qos();
     if (z_declare_publisher(z_loan(g_zs), &g_pub_img, z_loan(ke_img), &image_qos) != Z_OK) {
         printf("[zenoh] image publisher failed\n"); return 1;
     }
-    if (g_legacy_only) xt::log_fragmented_reliable_qos(key, image_qos);
-    else xt::log_fragmented_sensor_qos(key, image_qos);
+    xt::log_publisher_qos(key, image_qos);
     snprintf(key, sizeof key, "active/%s/pointcloud", stream_sn.c_str());
     z_owned_keyexpr_t ke_pc;
     z_keyexpr_from_str(&ke_pc, key);
-    auto pointcloud_qos = g_legacy_only ? xt::fragmented_reliable_data_qos() :
+    auto pointcloud_qos = g_legacy_legacy_only ? xt::fragmented_reliable_data_qos() :
         xt::fragmented_sensor_data_qos();
     if (z_declare_publisher(z_loan(g_zs), &g_pub_pc, z_loan(ke_pc), &pointcloud_qos) != Z_OK) {
         printf("[zenoh] 点云发布者失败\n"); return 1;
     }
-    if (g_legacy_only) xt::log_fragmented_reliable_qos(key, pointcloud_qos);
+    if (g_legacy_legacy_only) xt::log_fragmented_reliable_qos(key, pointcloud_qos);
     else xt::log_fragmented_sensor_qos(key, pointcloud_qos);
-    if (g_legacy_compat_enabled && !g_legacy_only && g_legacy_sn != g_sn) {
+    if (g_legacy_compat_enabled && !g_legacy_legacy_only && g_legacy_legacy_sn != g_sn) {
         auto compatibility_qos = xt::fragmented_reliable_data_qos();
-        snprintf(key, sizeof key, "active/%s/image", g_legacy_sn.c_str());
+        snprintf(key, sizeof key, "active/%s/image", g_legacy_legacy_sn.c_str());
         z_owned_keyexpr_t ke_img_compat;
         z_keyexpr_from_str(&ke_img_compat, key);
         if (z_declare_publisher(z_loan(g_zs), &g_pub_img_compat, z_loan(ke_img_compat), &compatibility_qos) != Z_OK) {
             printf("[compat] image publisher failed\n"); return 1;
         }
         xt::log_fragmented_reliable_qos(key, compatibility_qos);
-        snprintf(key, sizeof key, "active/%s/pointcloud", g_legacy_sn.c_str());
+        snprintf(key, sizeof key, "active/%s/pointcloud", g_legacy_legacy_sn.c_str());
         z_owned_keyexpr_t ke_pc_compat;
         z_keyexpr_from_str(&ke_pc_compat, key);
         if (z_declare_publisher(z_loan(g_zs), &g_pub_pc_compat, z_loan(ke_pc_compat), &compatibility_qos) != Z_OK) {
             printf("[compat] pointcloud publisher failed\n"); return 1;
         }
         xt::log_fragmented_reliable_qos(key, compatibility_qos);
-        printf("[compat] legacy sensor topics active/%s/{image,pointcloud}\n", g_legacy_sn.c_str());
-    } else if (!g_legacy_only) {
+        printf("[compat] legacy sensor topics active/%s/{image,pointcloud}\n", g_legacy_legacy_sn.c_str());
+    } else if (!g_legacy_legacy_only) {
         g_legacy_compat_enabled = false;
     }
     g_preview_enabled = getenv("XT_PCLOUD_PREVIEW") && strcmp(getenv("XT_PCLOUD_PREVIEW"), "1") == 0;
@@ -1744,9 +2021,9 @@ int main(int argc, char **argv) {
     };
     if (!declare_command(stream_sn, "setting", &g_qable_setting) ||
         !declare_command(stream_sn, "reboot", &g_qable_reboot)) return 1;
-    if (g_legacy_compat_enabled && !g_legacy_only) {
-        if (!declare_command(g_legacy_sn, "setting", &g_qable_compat_setting) ||
-            !declare_command(g_legacy_sn, "reboot", &g_qable_compat_reboot)) return 1;
+    if (g_legacy_compat_enabled && !g_legacy_legacy_only) {
+        if (!declare_command(g_legacy_legacy_sn, "setting", &g_qable_compat_setting) ||
+            !declare_command(g_legacy_legacy_sn, "reboot", &g_qable_compat_reboot)) return 1;
     }
     printf("[zenoh] publishers active/%s/image, active/%s/pointcloud ready; preview=%s\n",
            stream_sn.c_str(), stream_sn.c_str(), g_preview_enabled ? "enabled" : "disabled");
@@ -1826,6 +2103,16 @@ int main(int argc, char **argv) {
     build_maptable();
 
     if (configure_radar_udp()) printf("[xt] UDP 目标已设置 %s:%d\n", BOARD_IP, UDP_PORT);
+    // A service restart does not necessarily stop the sensor ASIC. Match the
+    // vendor SDK configuration sequence so CMD_SET_MAXFPS is applied between
+    // measurement sessions rather than while the old session is still active.
+    {
+        std::vector<uint8_t> response;
+        const bool stopped = radar_cmd(2, {}, response);
+        printf("[radar] stop-before-rate accepted=%d response_bytes=%zu\n", stopped, response.size());
+        if (!stopped) tcp_connect_radar();
+    }
+    configure_radar_max_fps();
     // cmd 1: 开始测量 (Depth+Amplitude, 连续)
     {
         g_debug = true;
@@ -1919,9 +2206,9 @@ int main(int argc, char **argv) {
                         next_recovery_ms = 0;
                         std::vector<float> px, py, pz;
                         std::vector<uint8_t> inten;
-                        compute_points(dist, amp, width, height, finfo, px, py, pz, inten);
-                        size_t valid = 0;
-                        for (auto v : pz) if (!std::isnan(v)) valid++;
+                        const auto counts = compute_points(dist, amp, width, height,
+                                                           finfo, px, py, pz, inten);
+                        const size_t valid = counts.valid;
                         if (g_zenoh_ok) {
                             uint64_t now = now_ms();
                             uint64_t last = g_last_pc_ms.load();
@@ -1936,6 +2223,8 @@ int main(int argc, char **argv) {
                                     job.frame = frames;
                                     job.total = px.size();
                                     job.valid = valid;
+                                    job.filter_counts = counts;
+                                    job.mini_amp = finfo.miniAmp;
                                     job.temperature[0] = int(finfo.temperature[0]);
                                     job.temperature[1] = int(finfo.temperature[1]);
                                     job.devstate = unsigned(finfo.devstate);
@@ -1982,7 +2271,9 @@ int main(int argc, char **argv) {
                     std::this_thread::sleep_for(std::chrono::seconds(4));
                     if (tcp_connect_radar()) radar_cmd(0,{},resp);
                 }
-                started=configure_radar_udp() && radar_cmd(1,{0x02,0x01},resp);
+                const bool udp_ok = configure_radar_udp();
+                configure_radar_max_fps();
+                started=udp_ok && radar_cmd(1,{0x02,0x01},resp);
             }
             printf("[recovery] start_sent=%d; waiting for actual valid frame\n",started);
             next_recovery_ms=now_ms()+uint64_t(std::min(retry_count,4))*2000;

@@ -1,0 +1,53 @@
+{
+  "created_date": "2026-10-04",
+  "git_head_reference_only": "redacted",
+  "original_core_source_sha256": {
+    "board/src/device_config.hpp": "3e5a677c155276d42a676685bf4d88feab4291c535271af70711da43a5f35379",
+    "board/src/device_sn.hpp": "654be3811c4616d2c95375950f95fdbddff3b77a4a4b9ef2076e9717187539ef",
+    "board/src/embedded_web.hpp": "cb46462b7676d6d8823372f24419a17b1b69de19f3cb639c9e119efaaa484323",
+    "board/src/h264_annexb.hpp": "fbf3b7df0d70e4103364605c14a525cbf1349d5f52e9de59bcd1139388620f8c",
+    "board/src/protocol_clock.hpp": "e3cb90b1bc9aa76895c0754208dfa2dff7a4cba7120d1b0c66b7f248c1b575f3",
+    "board/src/publish_queue.hpp": "a5a723a0a06aa8f2b62eca91c547a387e9ced8b02de43e6c769b4b0b32f135b9",
+    "board/src/request_parser.hpp": "8d1c34d93b7413ab5229105a7fb849d601f6f36a4c5ea096dcfed7bb7923c327",
+    "board/src/snapshot_client.hpp": "bbf04dd6526cc1e8d04161581809dbc74959a8a057bad92ee01732c7934b9e13",
+    "board/src/xt_camera.cpp": "23f7d347ebf3d89683471f41cab59c19c8d690ab189a925cf4ca092dd425c3f4",
+    "board/src/xt_m60_filter.hpp": "605355da4cdd0f9f0c2c0fabba606298e0a8b76daa0b697e5ea7af1c9c61410d",
+    "board/src/xt_radar.cpp": "fbff3a4b5e32acc0980055925dad43e99ec4a7d7b98f7ed929e39bff5def2c1e",
+    "board/src/zenoh_config.hpp": "3dcda9d8eeb65afd9bd55c65250f20c7f256ddc354179506d483f86e1b8d2c35",
+    "board/src/zenoh_qos.hpp": "321ebfef539a294733a7f1cc23afdda623c580cb162ec4758c0ba5514b47f752",
+    "board/init/S50xtmanagement": "4b70122fc1959de44b4207de73f1dd5ef9490262dfa9d3650b0298aaaa39a2d4",
+    "board/init/S50xtntp": "0df42cc6b422f7680238e61cfee466319974838da40bfbb7749d4d62e558d854",
+    "board/init/S97xttime": "b4aec30a1e2cc4ea3e5216dea2b68d423fcf20bec0ab6435f5ed9505754d6e80",
+    "board/init/S97zenohd": "e0b884dfe1766bba1e37e137ccf03714d142d3b9c10da71e6745c32a4105196d",
+    "board/init/S98zzgateway": "07e912d3b68e812b4cf98fea1813021322f1d98ee844ade9786e94f1c3b83819",
+    "board/init/S99xtcamera": "d0b48e38a7e73156a3d490f1a9277dd78c169f285955f6f45fd1f180aa2907d1",
+    "board/init/S99xtcamtime": "f284a04df3e5a885849b47df5b398268fbf822c584db49e35415b9f580c4e566",
+    "board/init/S99xtradar": "db928b39222a95a010f584dcd454105c99ea01d6cbdb5a2269e915bcb1f728b8",
+    "pc/active_msgs_pb2.py": "9bbcb4b3617c02d8e726c9dee68b278b11cdc647f157bdb39ea164c83d9e85d8",
+    "pc/gateway.py": "2e45eae3a3fa3d13a376da03fb4e41a7f29a5eb204a3d5251fa0ae97e403666c",
+    "pc/recorder.py": "c88846fc33f346c9647628a2235a0ca60c26229a347461153c744a300d53c2ec",
+    "pc/viewer.html": "c92c3b818b0a2c4a747fc90b158424c1a55b586963e992514762c621d89270b1",
+    "pc/__init__.py": "7b20582b716e68660cdee937b6428373b2cd9384811e6f2e4450199584285447",
+    "protocol/active_msgs.proto": "6da509140872ba7d5bc07a5ae31b16ed9d3a0501e652072e73e0cd83ffeaf884"
+  },
+  "export_modifications": [
+    "Camera credentials loaded from camera.env; embedded credentials removed.",
+    "vizd stream URLs loaded from environment.",
+    "Credentials required at startup; no original-device secrets supplied.",
+    "New board/PC templates and complete calibration dependency declarations.",
+    "Shell scripts normalized to LF.",
+    "XT_CAMERA_USER overrides default admin.",
+    "XT_DEVICE_SN_FILE permits per-device app identity without changing factory YAML.",
+    "Gateway/radar init scripts load runtime.env; router also supports /usr/bin/zenohd."
+  ],
+  "excluded": [
+    ".git and local environments",
+    "historical binaries",
+    "device calibration and factory identity",
+    "packet captures and photos",
+    "personal documents",
+    "historical patch/deploy scripts",
+    "Keil cracker and music reverse-engineering materials"
+  ],
+  "release_status": "engineering_source_and_trial_deployment_not_production_accepted"
+}

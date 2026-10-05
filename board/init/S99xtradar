@@ -7,6 +7,9 @@ LOG=/userdata/xtapp/xt_radar.log
 PIDFILE=/var/run/xt_radar.pid
 
 start() {
+    if [ -r /userdata/xtapp/runtime.env ]; then
+        set -a; . /userdata/xtapp/runtime.env; set +a
+    fi
     echo "Starting xt_radar..."
     if [ -f "$PIDFILE" ] && kill -0 $(cat "$PIDFILE") 2>/dev/null; then
         echo "xt_radar already running"

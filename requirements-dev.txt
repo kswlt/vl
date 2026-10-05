@@ -1,2 +1,7 @@
 -r requirements.txt
 grpcio-tools==1.83.1
+scipy>=1.11,<2
+
+# Calibration dependencies verified on the packaging PC
+numpy==2.5.3
+opencv-contrib-python==5.0.0.93

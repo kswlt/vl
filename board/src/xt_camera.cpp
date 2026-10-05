@@ -9,6 +9,7 @@
  *   JPEG data is one complete native snapshot, unmodified.
  *   H264 data is one complete native access unit in Annex-B form.
  ******************************************************************************/
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -47,9 +48,9 @@
 
 static const char *CAMERA_IP = "192.0.2.123";
 static const int CAMERA_PORT = 80;
-static const char *CAM_USER = "admin";
-static const char *CAM_PASSWORD = "123456";
-static const char *CAM_PASS_MD5 = "E10ADC3949BA59ABBE56E057F20F883E";
+static const char *CAM_USER = getenv("XT_CAMERA_USER") ? getenv("XT_CAMERA_USER") : "admin";
+static const char *CAM_PASSWORD = getenv("XT_CAMERA_PASSWORD");
+static const char *CAM_PASS_MD5 = getenv("XT_CAMERA_PASSWORD_MD5");
 static const int DEFAULT_SNAPSHOT_STREAM = 1; // MC800S: 1=1920x1080, 0=720x480
 static const int IMAGE_FORMAT_JPEG = 2;
 static const int IMAGE_FORMAT_H264 = 3;
@@ -60,7 +61,7 @@ static int IMAGE_MODE = IMAGE_FORMAT_JPEG;
 static int H264_GOP = 30;
 static int H264_BITRATE_BPS = 8 * 1024 * 1024;
 static bool H264_NATIVE_PASSTHROUGH = false;
-static const char *SN_FILE = "/mnt/system/factory-data/Legacy.yaml";
+static const char *SN_FILE = getenv("XT_DEVICE_SN_FILE") ? getenv("XT_DEVICE_SN_FILE") : "/mnt/system/factory-data/Legacy.yaml";
 static std::string g_sn = "UNCONFIGURED";
 static const char *RAW_DIR = "/userdata/xtapp/raw_camera";
 static const int RAW_WINDOW_SEC = 300;
@@ -515,10 +516,54 @@ private:
     std::vector<uint8_t> buf_;
 };
 
-class FfmpegJpegClient {
+// Some Rockchip mppjpegenc builds emit two JPEG headers in one frame:
+// SOI/APP0/DQT/.../SOS followed immediately by DQT/.../SOS and image data.
+// Strict decoders (including browsers and libjpeg) reject the second SOF.
+// Keep the first SOI/APP0 and the complete second header; do not recompress.
+static bool normalize_mpp_jpeg_header(std::vector<uint8_t> &jpeg) {
+    if (jpeg.size() < 64 || jpeg[0] != 0xff || jpeg[1] != 0xd8) return false;
+    size_t at = 2, first_dqt = 0, second_header = 0;
+    while (at + 4 < jpeg.size() && jpeg[at] == 0xff) {
+        const size_t marker_start = at;
+        while (at < jpeg.size() && jpeg[at] == 0xff) ++at;
+        if (at >= jpeg.size()) return false;
+        const uint8_t marker = jpeg[at++];
+        if (marker == 0xd8 || marker == 0xd9 || marker == 0x00 ||
+            (marker >= 0xd0 && marker <= 0xd7)) return false;
+        if (at + 2 > jpeg.size()) return false;
+        const size_t length = (size_t(jpeg[at]) << 8) | jpeg[at + 1];
+        if (length < 2 || length > jpeg.size() - at) return false;
+        if (marker == 0xdb && first_dqt == 0) first_dqt = marker_start;
+        at += length;
+        if (marker == 0xda) {
+            if (first_dqt && at + 4 < jpeg.size() && jpeg[at] == 0xff &&
+                jpeg[at + 1] == 0xdb) second_header = at;
+            break;
+        }
+    }
+    if (!second_header) return true; // Ordinary JPEG.
+    size_t scan = second_header;
+    bool second_sof = false, second_sos = false;
+    while (scan + 4 < jpeg.size() && scan < second_header + 2048 && jpeg[scan] == 0xff) {
+        while (scan < jpeg.size() && jpeg[scan] == 0xff) ++scan;
+        if (scan >= jpeg.size()) return false;
+        const uint8_t marker = jpeg[scan++];
+        if (scan + 2 > jpeg.size()) return false;
+        const size_t length = (size_t(jpeg[scan]) << 8) | jpeg[scan + 1];
+        if (length < 2 || length > jpeg.size() - scan) return false;
+        if (marker == 0xc0) second_sof = true;
+        scan += length;
+        if (marker == 0xda) { second_sos = true; break; }
+    }
+    if (!second_sof || !second_sos || first_dqt >= second_header) return false;
+    jpeg.erase(jpeg.begin() + first_dqt, jpeg.begin() + second_header);
+    return true;
+}
+
+class MppJpegClient {
 public:
-    explicit FfmpegJpegClient(std::string uri) : uri_(std::move(uri)) {}
-    ~FfmpegJpegClient() { stop(); }
+    explicit MppJpegClient(std::string uri) : uri_(std::move(uri)) {}
+    ~MppJpegClient() { stop(); }
 
     bool start() {
         stop();
@@ -534,14 +579,18 @@ public:
                 dup2(devnull, STDERR_FILENO);
             }
             for (int fd = 3; fd < 1024; ++fd) close(fd);
-            const char *configured = getenv("XT_CAMERA_FFMPEG");
-            const char *program = configured && *configured ? configured : "/userdata/xtapp/ffmpeg";
-            char quality[8];
-            snprintf(quality, sizeof quality, "%d", jpeg_quality());
-            const char *args[] = {program, "-hide_banner", "-loglevel", "error",
-                "-rtsp_transport", "tcp", "-re", "-i", uri_.c_str(), "-map", "0:v:0",
-                "-an", "-c:v", "mjpeg", "-q:v", quality, "-threads", "4",
-                "-f", "image2pipe", "pipe:1", nullptr};
+            const char *program = "/usr/bin/gst-launch-1.0";
+            char location[512], quality[32];
+            snprintf(location, sizeof location, "location=%s", uri_.c_str());
+            // FFmpeg q:v is inverse (lower is better); MPP q-factor is a
+            // direct quality percentage. Keep the default q=5 near quality 85.
+            const int q_factor = std::clamp(100 - jpeg_quality() * 3, 5, 95);
+            snprintf(quality, sizeof quality, "q-factor=%d", q_factor);
+            const char *args[] = {program, "-q", "rtspsrc", location,
+                "protocols=tcp", "latency=50", "!", "rtph264depay", "!",
+                "h264parse", "!", "mppvideodec", "!", "queue",
+                "max-size-buffers=4", "leaky=downstream", "!", "mppjpegenc",
+                quality, "!", "fdsink", "fd=1", "sync=false", nullptr};
             execv(program, const_cast<char *const *>(args));
             _exit(127);
         }
@@ -559,7 +608,8 @@ public:
             if (parser_.pop(jpeg)) {
                 width = 0;
                 height = 0;
-                return !jpeg.empty() && parse_jpeg_size(jpeg, width, height);
+                return normalize_mpp_jpeg_header(jpeg) &&
+                    parse_jpeg_size(jpeg, width, height);
             }
             pollfd pfd{fd_, POLLIN, 0};
             int result;
@@ -647,13 +697,14 @@ static void capture_h264_thread_main() {
 static void capture_jpeg_transcode_thread_main() {
     const std::string uri = std::string("rtsp://") + CAMERA_IP + ":554/stream0?username=" +
         CAM_USER + "&password=" + CAM_PASS_MD5;
-    FfmpegJpegClient client(uri);
+    MppJpegClient client(uri);
     uint64_t captures = 0, failures = 0, reconnects = 0;
-    printf("[cap] JPEG transcode: H264 RTSP -> MJPEG q=%d target=%dHz\n", jpeg_quality(), TARGET_HZ);
+    printf("[cap] JPEG transcode: H264 RTSP -> MPP JPEG q-factor=%d target=%dHz\n",
+           std::clamp(100 - jpeg_quality() * 3, 5, 95), TARGET_HZ);
     while (g_running.load()) {
         if (!client.start()) {
             ++failures;
-            printf("[cap] JPEG ffmpeg start failed, retry in 1s\n");
+            printf("[cap] MPP JPEG pipeline start failed, retry in 1s\n");
             sleep(1);
             continue;
         }
@@ -701,6 +752,10 @@ static bool pop_frame(Frame &f) {
 }
 
 int main() {
+    if (!CAM_PASSWORD || !*CAM_PASSWORD || !CAM_PASS_MD5 || !*CAM_PASS_MD5) {
+        fprintf(stderr, "Camera credentials missing: load camera.env before starting.\n");
+        return 1;
+    }
     signal(SIGPIPE, SIG_IGN);
     setvbuf(stdout, NULL, _IONBF, 0);
     xt::Json settings;

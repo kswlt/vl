@@ -1,14 +1,49 @@
 #!/bin/sh
-# Optional, persistent NTP client configuration for multi-board deployments.
-# One server hostname/IP per line in /userdata/xtapp/ntp-servers.conf.
+# Persistent NTP role: this device can serve its RTC-backed system clock to
+# other devices when no upstream NTP server exists.
 set -eu
+ROLE=/userdata/xtapp/time-role.conf
 SERVERS=/userdata/xtapp/ntp-servers.conf
 CONFIG=/etc/chrony.conf
+SERVER_CONFIG=/userdata/xtapp/chrony-server.conf
+
+TIME_ROLE=client
+NTP_ALLOW=198.51.100.0/24
+[ ! -r "$ROLE" ] || . "$ROLE"
+
+start_server() {
+    [ "$(date -u +%Y)" -ge 2020 ] || {
+        echo 'RTC/system clock invalid; refusing to serve NTP' >&2
+        return 1
+    }
+    hwclock -r >/dev/null 2>&1 || {
+        echo 'RTC read failed; refusing to serve NTP' >&2
+        return 1
+    }
+    case "$NTP_ALLOW" in
+        ''|*[!0-9./]*) echo "invalid NTP_ALLOW: $NTP_ALLOW" >&2; return 1 ;;
+    esac
+    cat > "$SERVER_CONFIG" <<EOF
+# RTC-backed local time authority for the isolated device network.
+driftfile /userdata/xtapp/chrony.drift
+makestep 1.0 3
+rtcsync
+local stratum 8
+allow $NTP_ALLOW
+port 123
+EOF
+    chmod 600 "$SERVER_CONFIG"
+    killall chronyd >/dev/null 2>&1 || true
+    sleep 1
+    chronyd -f "$SERVER_CONFIG"
+}
 
 case "${1:-}" in
     start|restart) ;;
     status)
         date -u '+system_time_utc=%Y-%m-%dT%H:%M:%SZ'
+        echo "time_role=$TIME_ROLE"
+        if [ "$TIME_ROLE" = rtc_master ]; then echo "ntp_allow=$NTP_ALLOW"; hwclock -r || true; fi
         if [ -r "$SERVERS" ]; then sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' "$SERVERS" | sed 's/^/server=/' ; fi
         if command -v chronyc >/dev/null 2>&1; then
             chronyc tracking || true
@@ -17,6 +52,11 @@ case "${1:-}" in
         exit 0 ;;
     *) echo "usage: $0 {start|restart|status}" >&2; exit 1 ;;
 esac
+
+if [ "$TIME_ROLE" = rtc_master ]; then
+    start_server
+    exit $?
+fi
 
 [ -s "$SERVERS" ] || exit 0
 command -v chronyd >/dev/null 2>&1 || { echo 'chronyd unavailable' >&2; exit 1; }

@@ -34,6 +34,10 @@ apply_time() {
     . "$TIME"
     [ -n "${TIMEZONE:-}" ] && [ -e "/usr/share/zoneinfo/$TIMEZONE" ] && ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
     [ -n "${TIMEZONE:-}" ] && echo "$TIMEZONE" > /etc/timezone
+    if [ -r "$APP/time-role.conf" ]; then
+        . "$APP/time-role.conf"
+        [ "${TIME_ROLE:-client}" != rtc_master ] || return 0
+    fi
     first_ntp=$(printf '%s' "${NTP_SERVERS:-}" | cut -d, -f1)
     if [ -n "$first_ntp" ]; then
         if command -v chronyc >/dev/null 2>&1; then chronyc add server "$first_ntp" iburst >/dev/null 2>&1 || true; chronyc burst 4/4 >/dev/null 2>&1 || true

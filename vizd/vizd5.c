@@ -45,9 +45,9 @@
 #define GRID_Y_MIN -1.0f
 #define GRID_Y_MAX 1.0f
 
-static const char *RTSP_URL="rtsp://192.0.2.123:554/stream0?username=admin&password=123456";
+static const char *RTSP_URL;
 static const char *FFMPEG="/userdata/xtapp/ffmpeg_fmp4";
-static const char *SNAPSHOT_URL="http://192.0.2.123/cgi-bin/snapshot.cgi?stream=1&username=admin&password=E10ADC3949BA59ABBE56E057F20F883E";
+static const char *SNAPSHOT_URL;
 static volatile sig_atomic_t g_running=1;
 static volatile sig_atomic_t g_listen_fd=-1;
 static atomic_uint g_clients=0;
@@ -399,6 +399,10 @@ static void*conn_thread(void*arg){
 }
 static void on_signal(int sig){(void)sig;g_running=0;if(g_listen_fd>=0)close(g_listen_fd);}
 int main(void){
+    RTSP_URL=getenv("XT_VIZD_RTSP_URL");
+    SNAPSHOT_URL=getenv("XT_VIZD_SNAPSHOT_URL");
+    if(!RTSP_URL||!*RTSP_URL||!SNAPSHOT_URL||!*SNAPSHOT_URL){fprintf(stderr,"vizd URLs missing in environment\n");return 1;}
+    const char *ff=getenv("XT_VIZD_FFMPEG");if(ff&&*ff)FFMPEG=ff;
     signal(SIGPIPE,SIG_IGN);signal(SIGTERM,on_signal);signal(SIGINT,on_signal);
 #ifndef VIZD_NO_CURL
     curl_global_init(CURL_GLOBAL_DEFAULT);

@@ -6,6 +6,10 @@ PIDFILE=/var/run/xt_camera_supervisor.pid
 
 case "$1" in
   supervise)
+    [ -r "$APP/camera.env" ] || exit 1
+    set -a
+    . "$APP/camera.env"
+    set +a
     cd "$APP" || exit 1
     trap 'exit 0' TERM INT
     while :; do

@@ -341,18 +341,23 @@ class Source:
             extra.update(ai_preview_width=ai_width, ai_preview_height=ai_height,
                          ai_jpeg_bytes=len(ai_data) if ai_data else 0)
         else:
-            if msg.header.scaler != 1000:
-                raise ValueError(f"pointcloud scaler={msg.header.scaler}, expected 1000")
+            # scaler is carried in each LidarPointMsg header. Older deployed
+            # builds emitted 1000 while the current live board has emitted
+            # 2000; decode coordinates using the sample's declared scale so a
+            # valid stream is not dropped by a stale client-side assumption.
+            scaler = int(msg.header.scaler)
+            if scaler not in (1000, 2000):
+                raise ValueError(f"unsupported pointcloud scaler={scaler}; expected 1000 or 2000")
             data = bytearray(POINT.size * len(msg.points))
             for index, p in enumerate(msg.points):
-                POINT.pack_into(data, index * POINT.size, p.x / 1000, p.y / 1000, p.z / 1000,
+                POINT.pack_into(data, index * POINT.size, p.x / scaler, p.y / scaler, p.z / scaler,
                                 p.rgbi, float(p.rgbi & 255), p.ring, p.offset)
             display = fg.PointCloud(timestamp=timestamp, frame_id="lidar",
                                     pose=fg.Pose(orientation=fg.Quaternion(w=1)),
                                     point_stride=POINT.size, fields=POINT_FIELDS, data=bytes(data))
             point_data = bytes(data)
             extra = dict(points=len(msg.points), displayed_points=len(data) // POINT.size,
-                         batch_size=batch_size)
+                         batch_size=batch_size, scaler=scaler)
             if self.recorder:
                 self.recorder.submit(msg.header.stamp, payload)
         # Foxglove output is deliberately decoupled: a slow UI only drops display frames.

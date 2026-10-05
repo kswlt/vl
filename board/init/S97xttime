@@ -3,6 +3,10 @@
 APP=/userdata/xtapp
 PIDFILE=/var/run/xt_time_sync.pid
 URL=http://198.51.100.200:8123/time
+ROLE="$APP/time-role.conf"
+
+TIME_ROLE=client
+[ ! -r "$ROLE" ] || . "$ROLE"
 
 valid_time() {
     [ "$(date +%Y 2>/dev/null || echo 1970)" -ge 2020 ]
@@ -35,6 +39,14 @@ wait_and_recover() {
 
 case "$1" in
   start)
+    if [ "$TIME_ROLE" = rtc_master ]; then
+        if valid_time && hwclock -r >/dev/null 2>&1; then
+            logger -t xt-time 'RTC-backed master clock ready; host sync disabled'
+            exit 0
+        fi
+        logger -t xt-time 'RTC-backed master clock invalid; manual correction required'
+        exit 1
+    fi
     # Always try host sync first: RTC time may be stale/wrong after power loss,
     # and hctosys may have just overwritten the system clock with it.
     if sync_once; then

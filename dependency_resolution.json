@@ -1,0 +1,87 @@
+{
+  "status": "PASS",
+  "method": "pip install --dry-run --ignore-installed -r requirements-dev.txt",
+  "installed_into_new_environment": false,
+  "resolved_packages": [
+    {
+      "name": "eclipse-zenoh",
+      "version": "1.10.0"
+    },
+    {
+      "name": "foxglove-sdk",
+      "version": "0.27.0"
+    },
+    {
+      "name": "protobuf",
+      "version": "7.36.0"
+    },
+    {
+      "name": "aiohttp",
+      "version": "3.14.3"
+    },
+    {
+      "name": "pillow",
+      "version": "12.3.0"
+    },
+    {
+      "name": "grpcio-tools",
+      "version": "1.83.1"
+    },
+    {
+      "name": "numpy",
+      "version": "2.5.3"
+    },
+    {
+      "name": "opencv-contrib-python",
+      "version": "5.0.0.93"
+    },
+    {
+      "name": "scipy",
+      "version": "1.18.1"
+    },
+    {
+      "name": "aiohappyeyeballs",
+      "version": "2.7.1"
+    },
+    {
+      "name": "aiosignal",
+      "version": "1.4.0"
+    },
+    {
+      "name": "attrs",
+      "version": "26.1.0"
+    },
+    {
+      "name": "frozenlist",
+      "version": "1.8.0"
+    },
+    {
+      "name": "grpcio",
+      "version": "1.84.0"
+    },
+    {
+      "name": "multidict",
+      "version": "6.9.1"
+    },
+    {
+      "name": "propcache",
+      "version": "0.5.4"
+    },
+    {
+      "name": "setuptools",
+      "version": "84.0.0"
+    },
+    {
+      "name": "yarl",
+      "version": "1.25.1"
+    },
+    {
+      "name": "idna",
+      "version": "3.20"
+    },
+    {
+      "name": "typing_extensions",
+      "version": "4.16.0"
+    }
+  ]
+}

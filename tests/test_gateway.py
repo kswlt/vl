@@ -58,17 +58,28 @@ class GatewayTests(unittest.TestCase):
         self.assertIsNone(source.latest)
 
     def test_all_points_units_and_signed_offsets(self):
+        for scaler, divisor in ((1000, 1000), (2000, 2000)):
+            with self.subTest(scaler=scaler):
+                arr = pb.LidarPointMsgArray()
+                msg = arr.array.add(header=pb.Header(seq=1, stamp=100, scaler=scaler))
+                for i in range(10000):
+                    msg.points.add(x=-i, y=i, z=500, rgbi=0x12345678, ring=5, offset=-7)
+                source = self.source("pointcloud")
+                with patch("pc.gateway.fg.PointCloud", side_effect=lambda **kw: SimpleNamespace(**kw)):
+                    source.process(self.item(arr.SerializeToString()))
+                output = self.displayed(source)
+                self.assertEqual(len(output.data), 10000 * 40)
+                self.assertEqual(struct.unpack_from("<dddIfIi", output.data, 9999*40),
+                                 (-9999/divisor, 9999/divisor, 500/divisor,
+                                  0x12345678, 120., 5, -7))
+
+    def test_reject_unsupported_pointcloud_scaler(self):
         arr = pb.LidarPointMsgArray()
-        msg = arr.array.add(header=pb.Header(seq=1, stamp=100, scaler=1000))
-        for i in range(10000):
-            msg.points.add(x=-i, y=i, z=500, rgbi=0x12345678, ring=5, offset=-7)
+        msg = arr.array.add(header=pb.Header(seq=1, stamp=100, scaler=0))
+        msg.points.add(x=1, y=2, z=3)
         source = self.source("pointcloud")
-        with patch("pc.gateway.fg.PointCloud", side_effect=lambda **kw: SimpleNamespace(**kw)):
+        with self.assertRaisesRegex(ValueError, "unsupported pointcloud scaler=0"):
             source.process(self.item(arr.SerializeToString()))
-        output = self.displayed(source)
-        self.assertEqual(len(output.data), 10000 * 40)
-        self.assertEqual(struct.unpack_from("<dddIfIi", output.data, 9999*40),
-                         (-9.999, 9.999, .5, 0x12345678, 120., 5, -7))
 
     def test_receive_queue_is_bounded_and_counted(self):
         source = self.source("image")

@@ -1,6 +1,7 @@
 #!/bin/sh
 
 DAEMON=/userdata/xtapp/zenohd
+[ -x "$DAEMON" ] || DAEMON=/usr/bin/zenohd
 PIDFILE=/var/run/zenohd.pid
 LOG=/userdata/xtapp/zenohd.log
 

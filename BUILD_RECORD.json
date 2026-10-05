@@ -1,0 +1,58 @@
+{
+  "date": "2026-10-04",
+  "application_build": "PASS",
+  "mode": "fresh applications with previously built static dependencies",
+  "compiler": "aarch64-linux-gnu-g++ (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+  "script": "deploy/build_with_existing_dependencies.sh",
+  "working_source": "source snapshot in this package",
+  "static_dependencies": {
+    "build/zenoh-aarch64/lib/libzenohpico.a": {
+      "sha256": "05e4f30bc03f338f238e82819e105cddcfad58f9fd5352565e78fb1950bb65d7",
+      "bytes": 1018106
+    },
+    "build/zenoh-aarch64/include/zenoh-pico/config.h": {
+      "sha256": "2bead1d3cf40e5e3b2665daf6581ddfb07da6162ab2c91a7002c50f0292a12b8",
+      "bytes": 10189
+    },
+    "build/curl/lib/libcurl.a": {
+      "sha256": "2c803489453ccffcdd9fe0424418b64e588ecc9d5ff78817086ee14e6ca9cabd",
+      "bytes": 1322966
+    },
+    "tmp/zenohc-1.10.0/root/usr/lib/libzenohc.a": {
+      "sha256": "7065b229fd49541baa42d952028ff9d06b661c1252260c950f81f4bf85284ac8",
+      "bytes": 41847252
+    }
+  },
+  "applications": {
+    "vizd": {
+      "sha256": "6049618d5ffcd2279c430adbafec5a065cd2218d039b3d2294c343d2af509900",
+      "bytes": 1594200,
+      "architecture": "ELF64 aarch64",
+      "source": "source/vizd/vizd5.c"
+    },
+    "xt_camera": {
+      "sha256": "1937effff192e780bfe29048e84ce152f8f8ab50e60b8c9b7c9c3b8940260be2",
+      "bytes": 3204888,
+      "architecture": "ELF64 aarch64",
+      "source": "source/board/src/xt_camera.cpp"
+    },
+    "xt_gateway": {
+      "sha256": "810c1963afd63261699e029db6212fc76ecd9a8233f03bdc8d463efae136af67",
+      "bytes": 22194816,
+      "architecture": "ELF64 aarch64",
+      "source": "source/board/src/xt_radar.cpp"
+    },
+    "xt_radar": {
+      "sha256": "565c9041c20376e35cb7762e3f9c0beb036ca12ed58071ad4f8c0abb68b1586b",
+      "bytes": 3344848,
+      "architecture": "ELF64 aarch64",
+      "source": "source/board/src/xt_radar.cpp"
+    }
+  },
+  "not_verified": [
+    "clean dependency rebuild",
+    "second-board ABI/runtime acceptance",
+    "second-board installation/reboot/rollback",
+    "physical axis and calibration acceptance"
+  ]
+}

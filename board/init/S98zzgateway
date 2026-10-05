@@ -4,6 +4,9 @@ BIN=/userdata/xtapp/xt_gateway
 LOG=/userdata/xtapp/xt_gateway.log
 PIDFILE=/var/run/xt_gateway.pid
 start() {
+    if [ -r /userdata/xtapp/runtime.env ]; then
+        set -a; . /userdata/xtapp/runtime.env; set +a
+    fi
     [ -f "$PIDFILE" ] && kill -0 $(cat "$PIDFILE") 2>/dev/null && return 0
     cd /userdata/xtapp
     setsid nohup env XT_GATEWAY_MODE=1 "$BIN" > "$LOG" 2>&1 < /dev/null &

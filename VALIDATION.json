@@ -1,0 +1,124 @@
+{
+  "application_cross_compile": "PASS (4 ELF64 aarch64 applications)",
+  "python_core_regression": {
+    "run": 16,
+    "passed": 15,
+    "failed": 1,
+    "known_failure": "test_proto3_zero_scalars_are_omitted still asserts old Y sign; source intentionally contains new Y sign",
+    "log": "python_tests.log"
+  },
+  "deployment_unit_checks": {
+    "run": 4,
+    "passed": 4,
+    "scope": [
+      "plan makes no connection",
+      "unsafe SN rejected",
+      "shell quoting preserves credential metacharacters",
+      "newline/NUL rejected"
+    ]
+  },
+  "shell_syntax": "PASS (installer and build helper)",
+  "native_clock_unit": "PASS",
+  "native_pointcloud_filter_unit": "PASS",
+  "package_integrity": "verified separately by MANIFEST and ZIP CRC",
+  "hardware_deployment": "NOT_RUN",
+  "full_code_audit": "NOT_COMPLETE",
+  "release_status": "ENGINEERING_TRIAL_ONLY",
+  "new_pc_dependency_resolution": {
+    "status": "PASS",
+    "method": "pip install --dry-run --ignore-installed -r requirements-dev.txt",
+    "installed_into_new_environment": false,
+    "resolved_packages": [
+      {
+        "name": "eclipse-zenoh",
+        "version": "1.10.0"
+      },
+      {
+        "name": "foxglove-sdk",
+        "version": "0.27.0"
+      },
+      {
+        "name": "protobuf",
+        "version": "7.36.0"
+      },
+      {
+        "name": "aiohttp",
+        "version": "3.14.3"
+      },
+      {
+        "name": "pillow",
+        "version": "12.3.0"
+      },
+      {
+        "name": "grpcio-tools",
+        "version": "1.83.1"
+      },
+      {
+        "name": "numpy",
+        "version": "2.5.3"
+      },
+      {
+        "name": "opencv-contrib-python",
+        "version": "5.0.0.93"
+      },
+      {
+        "name": "scipy",
+        "version": "1.18.1"
+      },
+      {
+        "name": "aiohappyeyeballs",
+        "version": "2.7.1"
+      },
+      {
+        "name": "aiosignal",
+        "version": "1.4.0"
+      },
+      {
+        "name": "attrs",
+        "version": "26.1.0"
+      },
+      {
+        "name": "frozenlist",
+        "version": "1.8.0"
+      },
+      {
+        "name": "grpcio",
+        "version": "1.84.0"
+      },
+      {
+        "name": "multidict",
+        "version": "6.9.1"
+      },
+      {
+        "name": "propcache",
+        "version": "0.5.4"
+      },
+      {
+        "name": "setuptools",
+        "version": "84.0.0"
+      },
+      {
+        "name": "yarl",
+        "version": "1.25.1"
+      },
+      {
+        "name": "idna",
+        "version": "3.20"
+      },
+      {
+        "name": "typing_extensions",
+        "version": "4.16.0"
+      }
+    ]
+  },
+  "isolated_installer_transaction_tests": {
+    "run": 3,
+    "passed": 3,
+    "scope": [
+      "corrupt package rejected before app mutation",
+      "successful install followed by rollback restores managed files",
+      "failed process check triggers automatic restore"
+    ],
+    "limitation": "Linux temporary fixture with redirected system paths and simulated services, not board hardware"
+  }
+}
